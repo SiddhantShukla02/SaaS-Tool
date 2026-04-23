@@ -1,0 +1,17 @@
+# Web UI
+streamlit==1.40.0
+
+# Queue backend (production)
+rq==1.16.2
+redis==5.0.8
+
+# Your existing pipeline deps (keep in sync with your local env)
+python-dotenv==1.0.1
+gspread==6.1.4
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.147.0
+google-genai==0.4.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+trafilatura==1.12.2
