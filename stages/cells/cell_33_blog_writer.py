@@ -43,7 +43,7 @@ import gspread
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
-from app.utils.helper import get_sheet_client
+from app.utils.helper import get_sheet_client, get_google_creds
 
 from config import (
     GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
@@ -71,6 +71,7 @@ CITATIONS_TAB       = "Citation_List"
 DOC_TITLE           = DOC_OUTPUT_TITLE
 
 # ── Auth ─────────────────────────────────────────────────────────────
+creds = get_google_creds(SCOPES)
 gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 docs_service  = build("docs", "v1", credentials=creds)
