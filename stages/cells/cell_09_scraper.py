@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -32,9 +32,9 @@ import requests as req_lib
 import json, time, re
 from bs4 import BeautifulSoup
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
 from google.genai import types
+from app.utils.helper import get_sheet_client
 
 # ── Config ────────────────────────────────────────────────────────────
 SHEET_NAME        = SPREADSHEET_NAME
@@ -42,8 +42,6 @@ SOURCE_TAB        = "Final_Url"
 SOURCE_COL        = "URL"
 KEYWORD_TAB       = "keyword"
 OUTPUT_TAB        = "Url_data_ext"
-
-CREDS_FILE        = "creds_data.json"
 
 
 GEMINI_MODEL      = "gemini-2.5-flash"
@@ -56,8 +54,7 @@ SCOPES = [
 ]
 
 # ── Auth ──────────────────────────────────────────────────────────────
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [

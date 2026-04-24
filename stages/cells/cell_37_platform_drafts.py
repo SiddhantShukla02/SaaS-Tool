@@ -25,12 +25,12 @@ from datetime import datetime
 from collections import defaultdict
 
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
+from app.utils.helper import get_sheet_client
 from google.genai import types
 
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, CREDS_FILE, SPREADSHEET_NAME,
+    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
     SCOPES, MAX_CELL, MAX_TOKENS, SAFETY_OFF,
     BRAND, CITATION_ALLOWLIST, all_allowed_citations,
     COUNTRY_PERSONAS, get_persona, get_country_name,
@@ -43,8 +43,7 @@ from config_repurpose import (
 )
 
 # ── Auth ─────────────────────────────────────────────────────────────
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 

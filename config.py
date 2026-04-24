@@ -58,9 +58,9 @@ BRAVE_API_KEY     = _require_env("BRAVE_API_KEY")
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN if yours differs
 
-SPREADSHEET_NAME = "Copy_Keyword_n8n"        # Name of the main Google Sheet
-CREDS_FILE       = "creds_data.json"    # Path to service account JSON
-DOC_OUTPUT_TITLE = "Copy_Blog_Writeup"       # Name of the output Google Doc
+SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME") # Name of main google sheet
+DOC_OUTPUT_TITLE = os.environ.get("FINAL_DOC_NAME") # Name of main google doc
+
 
 
 # 🔒 DO NOT EDIT
@@ -1629,22 +1629,66 @@ AI_TELL_PHRASES = [
 
 import re  # needed for get_internal_link_suggestions()
 
+GOOGLE_CREDS_ENV_VARS = [
+    "type",
+    "project_id",
+    "private_key_id",
+    "private_key",
+    "client_email",
+    "client_id",
+    "auth_uri",
+    "token_uri",
+    "auth_provider_x509_cert_url",
+    "client_x509_cert_url",
+]
+
+
+
+def _count_citations():
+    total = 0
+    for v in CITATION_ALLOWLIST.values():
+        if isinstance(v, list):
+            total += len(v)
+        elif isinstance(v, dict):
+            total += sum(len(lst) for lst in v.values())
+    return total
+
+
+
 def _validate():
     issues = []
     if not BRAND.get("name"):
         issues.append("BRAND.name is empty")
     if not SPREADSHEET_NAME:
         issues.append("SPREADSHEET_NAME is empty")
-    if not CREDS_FILE:
-        issues.append("CREDS_FILE is empty")
     partner_total = sum(len(v) for v in PARTNER_HOSPITALS.values())
     if partner_total == 0:
         issues.append("⚠️  No partner hospitals configured — writer will fall back to generic names")
     if not INTERNAL_LINKS:
         issues.append("⚠️  No internal links configured — blog outputs won't suggest internal linking")
-    citation_total = sum(len(v) for v in CITATION_ALLOWLIST.values())
+
+    citation_total = _count_citations()
     if citation_total < 5:
         issues.append(f"⚠️  Only {citation_total} citations in allowlist — writer may be over-restricted")
+
+    missing_google_creds = [
+        name for name in GOOGLE_CREDS_ENV_VARS
+        if not os.environ.get(name, "").strip()
+    ]
+
+    if missing_google_creds:
+        issues.append(
+            "Missing Google service account env vars: "
+            + ", ".join(missing_google_creds)
+        )
+
+    private_key = os.environ.get("private_key", "")
+    if private_key and "\\n" not in private_key:
+        issues.append(
+            "Google private_key may be incorrectly formatted. "
+            "It should contain escaped \\n characters."
+        )
+    
     return issues
 
 

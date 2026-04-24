@@ -21,12 +21,12 @@ import json
 import time
 import re
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
+from app.utils.helper import get_sheet_client
 from google.genai import types
 
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, CREDS_FILE, SPREADSHEET_NAME,
+    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
     MAX_CELL, SAFETY_OFF, SCOPES, detect_specialty,
 )
 
@@ -36,8 +36,7 @@ OUTPUT_TAB     = "Keyword_data"
 MAX_TEXT_CHARS = 30_000
 
 # ── Auth ─────────────────────────────────────────────────────────────
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 

@@ -21,17 +21,15 @@ import time
 import requests
 import gspread
 # ─── PATCHED v16.1: Brave key from config, break bug fixed ────
-from config import BRAVE_API_KEY, CREDS_FILE, SPREADSHEET_NAME, SCOPES
+from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
+
+from app.utils.helper import get_sheet_client
 # ──────────────────────────────────────────────────────────────
 
-from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = "creds_data.json"
-from config import SPREADSHEET_NAME
-
 INPUT_TAB            = "keyword"
 OUTPUT_TAB           = "Related_search"
 
@@ -46,16 +44,8 @@ COUNTRY_MAP = {
     "om": "OM", "qa": "QA", "bh": "BH", "kw": "KW",
 }
 
-# ─────────────────────────────────────────────
-# GOOGLE SHEETS AUTH
-# ─────────────────────────────────────────────
-def get_sheet_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-    return gspread.authorize(creds)
+
+
 
 # ─────────────────────────────────────────────
 # READ KEYWORDS
@@ -247,7 +237,7 @@ def write_results(spreadsheet, rows):
 # ─────────────────────────────────────────────
 def main():
     print("🔗 Connecting to Google Sheets...")
-    client      = get_sheet_client()
+    client = get_sheet_client(SCOPES)
     spreadsheet = client.open(SPREADSHEET_NAME)
     print(f"   Opened: '{SPREADSHEET_NAME}'")
 

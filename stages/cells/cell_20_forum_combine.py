@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -27,7 +27,7 @@ import time
 import math
 from collections import Counter
 import gspread
-from google.oauth2.service_account import Credentials
+from app.utils.helper import get_sheet_client
 
 # ── Config ────────────────────────────────────────────────────────────
 SHEET_NAME     = SPREADSHEET_NAME
@@ -36,7 +36,6 @@ REDDIT_MD_TAB  = "Reddit_Insights_MD"
 BRAVE_TAB      = "Google_Forum_Insights"
 OUTPUT_TAB     = "Forum_Master_Raw"
 
-CREDS_FILE      = "creds_data.json"
 MAX_CELL        = 49000
 DEDUP_THRESHOLD = 0.80   # Jaccard token overlap ratio for deduplication
 
@@ -94,8 +93,7 @@ EMOTION_KEYWORDS = {
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────
-creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc    = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 
 # ── Sheet helpers ─────────────────────────────────────────────────────
 def _trunc(v):

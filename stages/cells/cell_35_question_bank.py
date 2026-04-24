@@ -22,13 +22,12 @@ from stages.cells.cell_23_shared_utils import *
 import re
 import time
 from datetime import datetime
-
+from app.utils.helper import get_sheet_client
 import gspread
-from google.oauth2.service_account import Credentials
 
 # Import from the two config files
 from config import (
-    CREDS_FILE, SPREADSHEET_NAME, SCOPES, MAX_CELL,
+    SPREADSHEET_NAME, SCOPES, MAX_CELL,
     COUNTRY_MAP, get_country_name, detect_specialty,
 )
 from config_repurpose import (
@@ -36,8 +35,7 @@ from config_repurpose import (
 )
 
 # ── Auth ─────────────────────────────────────────────────────────────
-creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc    = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 
 # ── Sheet helpers (reused pattern from v16 cells) ────────────────────
 def _trunc(v):

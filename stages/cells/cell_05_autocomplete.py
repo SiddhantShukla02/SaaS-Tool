@@ -14,12 +14,10 @@ import time
 import urllib.parse
 import requests
 import gspread
-from google.oauth2.service_account import Credentials
-
+from app.utils.helper import get_sheet_client
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SERVICE_ACCOUNT_FILE = "creds_data.json"   # Path to your GCP service account key
 from config import SPREADSHEET_NAME
                                                  # Exact name of the Google Sheet
 INPUT_TAB            = "keyword"                 # Tab to read keywords from
@@ -36,18 +34,6 @@ INTENT_MODIFIERS = [
 ]
 
 REQUEST_DELAY = 1.5   # Seconds between API calls (avoids Google rate-limiting)
-
-# ─────────────────────────────────────────────
-# GOOGLE SHEETS AUTH
-# ─────────────────────────────────────────────
-def get_sheet_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds  = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-    return gspread.authorize(creds)
-
 
 # ─────────────────────────────────────────────
 # READ KEYWORDS FROM INPUT TAB
@@ -137,7 +123,11 @@ def write_results(spreadsheet, rows: list[list]):
 def main():
     # 1. Connect to Google Sheets
     print("🔗 Connecting to Google Sheets...")
-    client      = get_sheet_client()
+    scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    client = get_sheet_client(scopes)
     spreadsheet = client.open(SPREADSHEET_NAME)
     print(f"   Opened: '{SPREADSHEET_NAME}'")
 

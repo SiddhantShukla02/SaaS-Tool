@@ -40,13 +40,13 @@ import json
 import time
 import re
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
+from app.utils.helper import get_sheet_client
 
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, CREDS_FILE, SPREADSHEET_NAME,
+    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
     MAX_CELL, MAX_TOKENS, SAFETY_OFF, SCOPES,
     TARGET_WORDS_PER_SECTION, HARD_CAP_WORDS, TARGET_READING_GRADE,
     MIN_STATS_PER_1000, YMYL_DISCLAIMERS,
@@ -71,8 +71,7 @@ CITATIONS_TAB       = "Citation_List"
 DOC_TITLE           = DOC_OUTPUT_TITLE
 
 # ── Auth ─────────────────────────────────────────────────────────────
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 docs_service  = build("docs", "v1", credentials=creds)
 drive_service = build("drive", "v3", credentials=creds)

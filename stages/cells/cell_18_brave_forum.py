@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -33,16 +33,14 @@ import time
 import os
 import gspread
 # ─── PATCHED v16.1: Brave key from config ────
-from config import BRAVE_API_KEY, CREDS_FILE, SPREADSHEET_NAME, SCOPES
+from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
 # ─────────────────────────────────────────────
 
-from google.oauth2.service_account import Credentials
-
+from app.utils.helper import get_sheet_client
 # ── Config ────────────────────────────────────────────────────────────
 SHEET_NAME        = SPREADSHEET_NAME
 INPUT_TAB         = "keyword"
 OUTPUT_TAB        = "Google_Forum_Insights"
-CREDS_FILE        = "creds_data.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -52,8 +50,7 @@ SCOPES = [
 MAX_CELL = 49000
 
 # ── Auth ──────────────────────────────────────────────────────────────
-creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc    = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 
 class BraveForumSearchCollector:
     """Collects patient discussions from Quora, forums, and review sites via Brave Search API."""

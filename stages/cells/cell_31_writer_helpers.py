@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')

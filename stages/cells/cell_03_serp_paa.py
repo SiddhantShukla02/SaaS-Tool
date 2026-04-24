@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -12,8 +12,7 @@ except ImportError:
 import requests
 import gspread
 import time
-from google.oauth2.service_account import Credentials
-
+from app.utils.helper import get_sheet_client
 # ==============================
 # CONFIGURATION
 # ==============================
@@ -37,8 +36,7 @@ def connect_google_sheet():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = Credentials.from_service_account_file("creds_data.json", scopes=scope)
-    client = gspread.authorize(creds)
+    client = get_sheet_client(scope)
     return client.open(SPREADSHEET_NAME)
 
 # ==============================

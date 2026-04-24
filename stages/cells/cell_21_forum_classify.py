@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -31,9 +31,9 @@ import re
 import time
 from collections import Counter, defaultdict
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
 from google.genai import types
+from app.utils.helper import get_sheet_client
 
 # ── Config ────────────────────────────────────────────────────────────
 SHEET_NAME    = SPREADSHEET_NAME
@@ -41,7 +41,6 @@ SOURCE_TAB    = "Forum_Master_Raw"
 OUTPUT_TAB    = "Forum_Master_Insights"
 MD_OUTPUT_TAB = "Forum_Master_MD"
 
-CREDS_FILE     = "creds_data.json"
 
 GEMINI_MODEL   = "gemini-2.5-flash"
 
@@ -69,8 +68,7 @@ EMOTION_INTENSITY = {
 HIGH_VALUE_CATEGORIES = {"Content_Gap", "Objection", "Country_Pain_Point"}
 
 # ── Auth ──────────────────────────────────────────────────────────────
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [

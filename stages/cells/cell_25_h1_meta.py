@@ -3,7 +3,7 @@
 try:
     from config import (SERP_API_KEY, GEMINI_API_KEY,
                          FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         CREDS_FILE, SPREADSHEET_NAME,
+                         SPREADSHEET_NAME,
                          GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
 except ImportError:
     print('⚠️ config.py not found — falling back to globals from Cell 1')
@@ -14,8 +14,8 @@ from stages.cells.cell_23_shared_utils import *
 # ─── CELL: H1 / Meta Title / Meta Description Generator ──────────────
 import json, time, re
 import gspread
-from google.oauth2.service_account import Credentials
 from google import genai
+from app.utils.helper import get_sheet_client
 from google.genai import types
 
 SHEET_NAME   = SPREADSHEET_NAME
@@ -24,7 +24,6 @@ URL_DATA_TAB = "Url_data_ext"
 PAA_TAB      = "PAA"
 OUTPUT_TAB   = "H1_Meta_Output"
 
-CREDS_FILE        = "creds_data.json"
 
 GEMINI_MODEL      = "gemini-2.5-flash"
 MAX_CELL          = 49000
@@ -34,8 +33,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-creds         = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc            = gspread.authorize(creds)
+gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [
