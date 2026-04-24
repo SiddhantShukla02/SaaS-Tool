@@ -58,7 +58,7 @@ BRAVE_API_KEY     = _require_env("BRAVE_API_KEY")
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN if yours differs
 
-SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME") # Name of main google sheet
+SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME_GLOBAL") # Name of main google sheet
 DOC_OUTPUT_TITLE = os.environ.get("FINAL_DOC_NAME") # Name of main google doc
 
 
