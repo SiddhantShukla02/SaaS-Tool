@@ -49,14 +49,23 @@ def _run_cell(cell_file: str, progress_cb: Callable[[str], None] | None = None) 
 
     # Capture stdout for the activity log
     captured = io.StringIO()
+
+    if progress_cb:
+        progress_cb(f"▶ started {cell_file}")
+
     with contextlib.redirect_stdout(captured):
         exec(code, namespace)
 
     output = captured.getvalue()
+
     if progress_cb:
-        # Pass last few lines as progress signal
-        for line in output.strip().splitlines()[-5:]:
-            progress_cb(line)
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+
+        for line in lines[-25:]:
+            progress_cb(f"[{cell_file}] {line}")
+
+        progress_cb(f"✅ finished {cell_file}")
+
     return output
 
 
@@ -138,6 +147,9 @@ def run_stage(stage_name: str, run_id: int,
 
     except Exception as e:
         tb = traceback.format_exc()
+        if progress_cb:
+            progress_cb(f"❌ failed {cell_file}: {type(e).__name__}: {e}")
+            
         return {
             "status":    "failed",
             "output":    "\n\n".join(outputs)[-2000:],

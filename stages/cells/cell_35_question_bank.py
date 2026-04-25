@@ -105,18 +105,29 @@ def load_autocomplete(sp):
         return []
     out = []
     for r in records:
-        s = str(r.get("Suggestion", "")).strip()
+        raw= str(
+            r.get("Suggestion",r.get("Suggestions",r.get("suggestions","")))
+        ).strip()
+
         kw = str(r.get("Keyword", "")).strip()
         cc = str(r.get("Country_Code", "")).strip().lower()
-        if s and "?" not in s and len(s.split()) >= 3:
-            # Reshape to question form
-            q = _reshape_to_question(s)
-            if q:
-                out.append({
-                    "question": q, "source": "autocomplete",
-                    "source_keyword": kw, "country_code": cc,
-                    "original_fragment": s,
-                })
+
+        if not raw:
+            continue
+
+        for s in raw.split("|"):
+            s = s.strip()
+            if s and "?" not in s and len(s.split()) >=3:
+                q = _reshape_to_question(s)
+                if q:
+                    out.append({
+                        "question": q,
+                        "source": "autocomplete",
+                        "source_keyword": kw,
+                        "country_code": cc,
+                        "original_fragment": s,
+                    })
+
     return out
 
 

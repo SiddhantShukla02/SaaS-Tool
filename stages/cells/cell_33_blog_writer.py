@@ -336,9 +336,9 @@ def load_blog_plan(sp):
         ws = sp.worksheet(FORUM_MD_TAB)
         recs = ws.get_all_records()
         for r in recs:
-            cat = str(r.get("Category", "")).strip()
+            cat = str(r.get("Insight_Type", "")).strip()
             if cat == "ALL_CATEGORIES":
-                plan["forum_data"] = str(r.get("MD_Content", "")).strip()
+                plan["forum_data"] = str(r.get("Prompt_Ready_Markdown", "")).strip()
                 break
     except Exception:
         pass

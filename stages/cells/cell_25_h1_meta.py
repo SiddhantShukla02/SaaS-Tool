@@ -99,8 +99,8 @@ def call_gemini(prompt, max_tokens=4000):
                     safety_settings=SAFETY_OFF,
                 ),
             )
-            if resp.candidates and resp.candidates[0].content.parts:
-                return resp.candidates[0].content.parts[0].text.strip()
+            if resp.text:
+                return resp.text.strip()
         except Exception as e:
             print(f"  ⚠️ Gemini attempt {attempt+1}/3: {e}")
             if attempt < 2:

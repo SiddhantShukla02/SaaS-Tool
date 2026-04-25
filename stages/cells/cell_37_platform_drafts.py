@@ -131,12 +131,25 @@ def load_forum_voice(sp, max_chars=5000):
     try:
         ws = sp.worksheet("Forum_Master_MD")
         records = ws.get_all_records()
-        if records:
-            for r in records:
-                if str(r.get("Category", "")).strip() == "ALL_CATEGORIES":
-                    return str(r.get("MD_Content", ""))[:max_chars]
+
+        for r in records:
+            if str(r.get("Insight_Type", "")).strip() == "ALL_CATEGORIES":
+                md = str(r.get("Prompt_Ready_Markdown", "")).strip()
+                if md and md.lower() != "nan":
+                    return md[:max_chars]
+
+        # fallback: merge category rows if ALL_CATEGORIES missing
+        blocks = []
+        for r in records:
+            md = str(r.get("Prompt_Ready_Markdown", "")).strip()
+            if md and md.lower() != "nan":
+                blocks.append(md)
+
+        return "\n\n---\n\n".join(blocks)[:max_chars]
+
     except Exception:
         pass
+
     return ""
 
 

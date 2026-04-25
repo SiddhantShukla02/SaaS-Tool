@@ -34,9 +34,11 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
     from app import db, orchestrator
 
     def progress_cb(line: str):
-        db.log(run_id, "info", line[:500])
-
+        print(f"[run {run_id}] {line}", flush=True)
+        db.log(run_id, "info", line[:1000])
+    db.log(run_id, "info", f"──────── {stage_name} ────────")
     db.log(run_id, "info", f"[worker] starting {stage_name}")
+    print(f"[run {run_id}] [worker] starting {stage_name}", flush=True)
     exec_id = db.record_stage_start(run_id, stage_name)
 
     try:
@@ -45,6 +47,9 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
             os.environ["SAAS_PLATFORM"] = job_params["platform"]
 
         result = run_stage(stage_name, run_id, progress_cb=progress_cb)
+        if result["status"] == "failed":
+            db.log(run_id, "error", result.get("error", "Stage failed")[:1000])
+            print(f"[run {run_id}] [worker] stage failed {stage_name}: {result.get('error')}", flush=True)
         db.record_stage_finish(
             exec_id, result["status"],
             log_excerpt=result.get("output", "")[-2000:],
@@ -53,9 +58,15 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
         orchestrator.on_stage_finished(
             run_id, stage_name, result["status"], result.get("error"),
         )
+        level = "error" if result["status"] == "failed" else "info"
+
+        db.log(run_id, level, f"[worker] finished {stage_name}: {result['status']}")
+        print(f"[run {run_id}] [worker] finished {stage_name}: {result['status']}", flush=True)
     except Exception as e:
         import traceback
         err = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}"
+        db.log(run_id, "error", err[:1000])
+        print(f"[run {run_id}] [worker] failed {stage_name}: {err}", flush=True)
         db.record_stage_finish(exec_id, "failed", error_message=err)
         orchestrator.on_stage_finished(run_id, stage_name, "failed", err)
 

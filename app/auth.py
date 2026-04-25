@@ -37,17 +37,12 @@ def _check_password() -> bool:
         st.markdown("### SaaS for Blog")
         st.caption("Divinheal content pipeline — internal tool")
         with st.form("login"):
-            user = st.text_input("Your name or email",
-                                  placeholder="nitish@divinheal")
             password = st.text_input("Password", type="password")
             submit = st.form_submit_button("Sign in")
         if submit:
-            if not user:
-                st.error("Please enter your name")
-                return False
             if hmac.compare_digest(password, expected):
                 st.session_state["authed"] = True
-                st.session_state["user"] = user.strip()
+                st.session_state["user"] = "internal"
                 st.rerun()
             else:
                 st.error("Wrong password")

@@ -263,22 +263,45 @@ def render_run_detail(run_id: int):
         st.info("🔄 Currently running. This page auto-refreshes every 5s.")
         # Auto-refresh while running
         import time as _time
-        _time.sleep(5)
+        _time.sleep(2)
         st.rerun()
 
+    # ── Currently running stage ──
+    running_exec = next((e for e in execs if e["status"] == "running"), None)
+
+    if running_exec:
+        stage_label = STAGE_DISPLAY.get(
+            running_exec["stage_name"],
+            running_exec["stage_name"]
+        )
+
+        st.markdown(f"### 🔄 Currently running: **{stage_label}**")
     # ── Activity log ──
+    st.markdown("---")
     st.markdown("#### Activity")
-    activity = db.get_activity(run_id, limit=40)
+    activity = db.get_activity(run_id, limit=150)
     if not activity:
         st.caption("No activity yet.")
     else:
-        for a in activity:
+        for a in reversed(activity):
             prefix = {"error": "🔴", "warn": "🟡", "info": "·"}.get(a["level"], "·")
             ts = a["timestamp"].split("T")[1][:8] if "T" in a["timestamp"] else a["timestamp"]
-            st.markdown(
-                f"<code>[{ts}]</code> {prefix} {a['message']}",
-                unsafe_allow_html=True,
-            )
+
+            msg = a["message"]
+
+            formatted = f"[{ts}] {msg}"
+
+            if "▶ started" in msg:
+                st.info(formatted)
+            elif "✅ finished" in msg:
+                st.success(formatted)
+            elif "❌" in msg or "failed" in msg.lower() or a["level"] == "error":
+                st.error(formatted)
+            else:
+                st.markdown(
+                    f"<code>[{ts}]</code> {prefix} {msg}",
+                    unsafe_allow_html=True,
+                )
 
 
 # ═════════════════════════════════════════════════════════════

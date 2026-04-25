@@ -78,7 +78,17 @@ from config import (
 
 # ── Status summary ────────────────────────────────────────────────
 partner_count = sum(len(v) for v in PARTNER_HOSPITALS.values())
-citation_count = sum(len(v) for v in CITATION_ALLOWLIST.values())
+def _count_citations(citation_allowlist):
+    total = 0
+    for v in citation_allowlist.values():
+        if isinstance(v, list):
+            total += len(v)
+        elif isinstance(v, dict):
+            total += sum(len(items) for items in v.values() if isinstance(items, list))
+    return total
+
+citation_count = _count_citations(CITATION_ALLOWLIST)
+
 
 print(f"✅ config.py loaded")
 print(f"   Brand              : {BRAND['name']} ({BRAND['website']})")
