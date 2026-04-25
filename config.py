@@ -117,9 +117,9 @@ TABS = {
 GEMINI_MODEL     = "gemini-2.5-flash"   # Default model for all calls
 
 MAX_CELL         = 49_000   # Google Sheets cell character limit buffer
-MAX_SCRAPE_CHARS = 40_000   # Max chars per scraped page sent to Gemini
-MAX_TOKENS       = 10_000    # Default Gemini output tokens
-OUTLINE_TOKENS   = 16_000   # Outline cell needs more (thinking mode overhead)
+MAX_SCRAPE_CHARS = 45_000   # Max chars per scraped page sent to Gemini
+MAX_TOKENS       = 20_000    # Default Gemini output tokens
+OUTLINE_TOKENS   = 25_000   # Outline cell needs more (thinking mode overhead)
 
 # Temperature by task type (lower = more deterministic)
 TEMP_KEYWORD_EXTRACT  = 0.3   # Structured extraction — deterministic
@@ -135,7 +135,7 @@ TEMP_H1_META          = 0.7   # Headlines need some creativity
 # ⚠️ FILL IN based on your editorial standards
 
 TARGET_WORDS_PER_SECTION = 450      # Per H2 body section
-HARD_CAP_WORDS           = 4_000    # Full blog cap
+HARD_CAP_WORDS           = 5_500    # Full blog cap
 TARGET_READING_GRADE     = 8        # Class 8 = ESL-friendly
 MIN_STATS_PER_1000       = 5        # GEO/AEO stat density target
 TARGET_FAQ_COUNT         = 12       # Sweet spot for FAQPage schema
