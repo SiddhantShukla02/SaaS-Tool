@@ -17,6 +17,7 @@ import contextlib
 import io
 from pathlib import Path
 from typing import Callable
+from app import db
 
 # Make the project root importable so cells can `from config import ...`
 ROOT = Path(__file__).parent.parent.resolve()
@@ -133,8 +134,20 @@ def run_stage(stage_name: str, run_id: int,
 
     try:
         for cell_file in STAGE_CELLS[stage_name]:
+
+            if db.is_cancelled(run_id):
+                if progress_cb:
+                    progress_cb("🛑 Run cancelled. Stopping before next cell.")
+                return{
+                    "status": "cancelled",
+                    "output": "\n\n".join(outputs)[-2000:],
+                    "error" : None,
+                    "duration": time.time() - started,
+                }
+
             if progress_cb:
                 progress_cb(f"→ running {cell_file}")
+
             output = _run_cell(cell_file, progress_cb)
             outputs.append(f"─── {cell_file} ───\n{output}")
 
@@ -149,7 +162,7 @@ def run_stage(stage_name: str, run_id: int,
         tb = traceback.format_exc()
         if progress_cb:
             progress_cb(f"❌ failed {cell_file}: {type(e).__name__}: {e}")
-            
+
         return {
             "status":    "failed",
             "output":    "\n\n".join(outputs)[-2000:],

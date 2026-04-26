@@ -196,6 +196,9 @@ def _row_to_run(row) -> dict:
     d["metadata"] = json.loads(d["metadata"]) if d["metadata"] else {}
     return d
 
+def is_cancelled(run_id: int) -> bool:
+    run = get_run(run_id)
+    return bool(run and run["status"] == STATUS_CANCELLED)
 
 # ─────────────────────────────────────────────────────────────
 # Stage executions

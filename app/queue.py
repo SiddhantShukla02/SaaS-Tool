@@ -47,6 +47,21 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
             os.environ["SAAS_PLATFORM"] = job_params["platform"]
 
         result = run_stage(stage_name, run_id, progress_cb=progress_cb)
+
+        if result["status"] == "cancelled":
+            db.log(run_id, "warn", f"[worker] stopped {stage_name} because run was cancelled")
+            print(f"[run {run_id}] [worker] stopped {stage_name}: cancelled", flush=True)
+
+            db.record_stage_finish(
+                exec_id,
+                "cancelled",
+                log_excerpt=result.get("output", "")[-2000:],
+                error_message=None,
+            )
+            return
+        
+
+
         if result["status"] == "failed":
             db.log(run_id, "error", result.get("error", "Stage failed")[:1000])
             print(f"[run {run_id}] [worker] stage failed {stage_name}: {result.get('error')}", flush=True)

@@ -260,7 +260,13 @@ def render_run_detail(run_id: int):
                              db.STATUS_STAGE3_RUNNING, db.STATUS_BANK_RUNNING,
                              db.STATUS_QUORA_RUNNING, db.STATUS_REDDIT_RUNNING,
                              db.STATUS_SUBSTACK_RUNNING):
-        st.info("🔄 Currently running. This page auto-refreshes every 5s.")
+        st.info("🔄 Currently running. This page auto-refreshes every 2s.")
+
+        if st.button("🛑 Stop run", type="secondary"):
+            orchestrator.cancel_run(run_id, auth.current_user())
+            st.warning("Stop requested. The current cell may finish, but no further cells/stages will start.")
+            st.rerun()
+            
         # Auto-refresh while running
         import time as _time
         _time.sleep(2)
