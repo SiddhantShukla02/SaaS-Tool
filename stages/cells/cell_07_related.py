@@ -16,12 +16,13 @@ Strategy:
     2. The keyword + "related" → extract title-derived query suggestions
   This reliably produces 15-30 related queries per keyword vs pytrends' 0.
 """
-
+import os
 import time
 import requests
 # ─── PATCHED v16.1: Brave key from config, break bug fixed ────
 from config import BRAVE_API_KEY
 from app.repositories.search_repo import save_related_searches
+from app.repositories.run_repo import get_run_keywords
 # ──────────────────────────────────────────────────────────────
 
 
@@ -193,10 +194,19 @@ def extract_related_queries(keyword, country_code):
 # ─────────────────────────────────────────────
 def main():
 
+    run_id_str = os.environ.get("SAAS_RUN_ID")
+    if not run_id_str:
+        raise ValueError("SAAS_RUN_ID not set")
+    run_id = int(run_id_str)
+
     keyword_pairs = [
-    {"keyword": "heart surgery cost in india", "country": "us"},
+    {
+        "keyword": row["keyword"],
+        "country": row["country_code"],
+    }
+    for row in get_run_keywords(run_id)
     ]
-    run_id = 1  # temporary
+
     if not keyword_pairs:
         raise ValueError("❌ No valid keyword/country pairs found.")
 
@@ -268,7 +278,7 @@ def main():
     print(f"\n📊 SUMMARY")
     print(f"   Keyword/country pairs processed : {len(unique_pairs)}")
     print(f"   Total related queries fetched   : {total_fetched}")
-    print(f"   Rows written to sheet           : {len(output_rows) - 1}")
+    print(f"   Rows processed                  : {len(output_rows) - 1}")
     print("\nSample related queries:")
     for q in queries[:3]:
         print(q)

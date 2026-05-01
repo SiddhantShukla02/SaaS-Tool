@@ -1,5 +1,7 @@
 from app.repositories.search_repo import save_serp_urls, save_paa_questions
 from config import SERP_API_KEY, EXCLUDED_DOMAINS
+from app.repositories.run_repo import get_run_keywords
+import os
 
 import requests
 import time
@@ -73,10 +75,20 @@ def fetch_google_search(keyword, country_code):
 # ==============================
 
 def main():
+    run_id_str = os.environ.get("SAAS_RUN_ID")
+
+    if not run_id_str:
+        raise ValueError("SAAS_RUN_ID not set")
+
+    run_id = int(run_id_str)
+
     keyword_data = [
-    {"Keyword": "heart surgery cost in india", "Country_Code": "US"},
+        {
+            "Keyword": row["keyword"],
+            "Country_Code": row["country_code"],
+        }
+        for row in get_run_keywords(run_id)
     ]
-    run_id = 1  # temporary, will replace later
 
     all_urls = []
     all_paa  = []

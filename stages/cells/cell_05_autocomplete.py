@@ -8,6 +8,8 @@ from app.repositories.search_repo import save_autocomplete_suggestions
 import time
 import urllib.parse
 import requests
+import os
+from app.repositories.run_repo import get_run_keywords
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -57,11 +59,22 @@ def fetch_google_autocomplete(query: str, language: str = "en", country: str = "
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    run_id = 1  # temporary
-    # 2. Read keywords
+
+    run_id_str = os.environ.get("SAAS_RUN_ID")
+
+    if not run_id_str:
+        raise ValueError("SAAS_RUN_ID not set")
+
+    run_id = int(run_id_str)
+
     keyword_pairs = [
-    {"keyword": "heart surgery cost in india", "country": "us"},
+    {
+        "keyword": row["keyword"],
+        "country": row["country_code"],
+    }
+    for row in get_run_keywords(run_id)
     ]
+
     if not keyword_pairs:
         raise ValueError("❌ No valid keyword/country pairs found — check the 'keyword' tab.")
 
