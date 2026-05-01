@@ -19,11 +19,9 @@ Strategy:
 
 import time
 import requests
-import gspread
 # ─── PATCHED v16.1: Brave key from config, break bug fixed ────
-from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
-
-from app.utils.helper import get_sheet_client
+from config import BRAVE_API_KEY
+from app.repositories.search_repo import save_related_searches
 # ──────────────────────────────────────────────────────────────
 
 
@@ -43,34 +41,6 @@ COUNTRY_MAP = {
     "pk": "PK", "bd": "BD", "lk": "LK", "np": "NP", "iq": "IQ",
     "om": "OM", "qa": "QA", "bh": "BH", "kw": "KW",
 }
-
-
-
-
-# ─────────────────────────────────────────────
-# READ KEYWORDS
-# ─────────────────────────────────────────────
-def read_keywords(spreadsheet) -> list:
-    ws      = spreadsheet.worksheet(INPUT_TAB)
-    records = ws.get_all_records()
-
-    if not records:
-        raise ValueError(f"❌ '{INPUT_TAB}' tab is empty or missing headers.")
-
-    keywords = []
-    for i, row in enumerate(records, start=2):
-        kw      = str(row.get("Keyword",      "")).strip()
-        country = str(row.get("Country_Code", "")).strip().lower()
-
-        if not kw:
-            continue
-        if not country:
-            continue
-
-        keywords.append({"keyword": kw, "country": country})
-
-    print(f"✅ Loaded {len(keywords)} keyword/country pairs from '{INPUT_TAB}'")
-    return keywords
 
 # ─────────────────────────────────────────────
 # BRAVE SEARCH → RELATED QUERIES
@@ -219,35 +189,21 @@ def extract_related_queries(keyword, country_code):
     return list(all_queries.values())
 
 # ─────────────────────────────────────────────
-# WRITE RESULTS
-# ─────────────────────────────────────────────
-def write_results(spreadsheet, rows):
-    try:
-        ws = spreadsheet.worksheet(OUTPUT_TAB)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=OUTPUT_TAB, rows=2000, cols=10)
-        print(f"  ℹ️  Created new tab: '{OUTPUT_TAB}'")
-
-    ws.clear()
-    ws.update(rows, value_input_option="USER_ENTERED")
-    print(f"✅ Written {len(rows) - 1} data rows to '{OUTPUT_TAB}'")
-
-# ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    print("🔗 Connecting to Google Sheets...")
-    client = get_sheet_client(SCOPES)
-    spreadsheet = client.open(SPREADSHEET_NAME)
-    print(f"   Opened: '{SPREADSHEET_NAME}'")
 
-    keyword_pairs = read_keywords(spreadsheet)
+    keyword_pairs = [
+    {"keyword": "heart surgery cost in india", "country": "us"},
+    ]
+    run_id = 1  # temporary
     if not keyword_pairs:
         raise ValueError("❌ No valid keyword/country pairs found.")
 
     # Deduplicate: same keyword + same country = one search
     seen = set()
     unique_pairs = []
+    all_related_rows = []
     for pair in keyword_pairs:
         key = (pair["keyword"].lower(), pair["country"])
         if key not in seen:
@@ -283,7 +239,15 @@ def main():
             output_rows.append([kw, country, geo, "NO_DATA", "", ""])
             continue
 
-        for q in queries:
+        for idx,q in enumerate(queries, start=1):
+            all_related_rows.append({
+                "keyword": kw,
+                "country_code": country,
+                "type": q["type"],
+                "position": idx ,
+                "query": q["query"],
+                "source": q["source"],
+            })            
             output_rows.append([
                 kw,
                 country,
@@ -297,16 +261,16 @@ def main():
         # Show sample
         sample = [q["query"] for q in queries[:3]]
         print(f"     ✅ {len(queries)} queries found → e.g. {sample}")
-
-    # Write results
-    print(f"\n📝 Writing results to sheet...")
-    write_results(spreadsheet, output_rows)
+    
+    save_related_searches(run_id, all_related_rows)
+    
 
     print(f"\n📊 SUMMARY")
     print(f"   Keyword/country pairs processed : {len(unique_pairs)}")
     print(f"   Total related queries fetched   : {total_fetched}")
     print(f"   Rows written to sheet           : {len(output_rows) - 1}")
-    print(f"\n✅ Done — check '{OUTPUT_TAB}' tab in '{SPREADSHEET_NAME}'")
-
+    print("\nSample related queries:")
+    for q in queries[:3]:
+        print(q)
 if __name__ == "__main__":
     main()

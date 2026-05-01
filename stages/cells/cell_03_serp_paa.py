@@ -1,18 +1,8 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
+from app.repositories.search_repo import save_serp_urls, save_paa_questions
+from config import SERP_API_KEY, EXCLUDED_DOMAINS
 
 import requests
-import gspread
 import time
-from app.utils.helper import get_sheet_client
 # ==============================
 # CONFIGURATION
 # ==============================
@@ -27,24 +17,7 @@ EXCLUDED_DOMAINS = [
     "clevelandclinic.org", "amazon.", "flipkart."
 ]
 
-# ==============================
-# GOOGLE SHEETS CONNECTION
-# ==============================
 
-def connect_google_sheet():
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    client = get_sheet_client(scope)
-    return client.open(SPREADSHEET_NAME)
-
-# ==============================
-# READ KEYWORDS
-# ==============================
-
-def read_keywords(sheet):
-    return sheet.worksheet("keyword").get_all_records()
 
 # ==============================
 # SINGLE API CALL → URLs + PAA
@@ -94,63 +67,16 @@ def fetch_google_search(keyword, country_code):
     print(f"  URLs: {len(urls)} | PAA: {len(paa)}")
     return urls, paa
 
-# ==============================
-# WRITE TO SERP_URL TAB
-# FIX: Use batch append_rows() instead of per-row append_row()
-# ==============================
-
-def write_urls(sheet, rows):
-    if not rows:
-        print("No URL results to write.")
-        return
-    try:
-        ws = sheet.worksheet("Serp_Url")
-    except:
-        ws = sheet.add_worksheet(title="Serp_Url", rows="1000", cols="4")
-
-    ws.clear()
-    time.sleep(2)  # Brief pause after clear
-
-    header = [["Keyword", "Country_Code", "Rank", "URL"]]
-    batch  = [[r["keyword"], r["country_code"], r["rank"], r["url"]] for r in rows]
-
-    ws.append_rows(header + batch, value_input_option="RAW")  # ✅ Single API call
-    print(f"✅ Serp_Url tab: {len(rows)} rows written.")
-
-# ==============================
-# WRITE TO PAA TAB
-# FIX: Use batch append_rows() instead of per-row append_row()
-# ==============================
-
-def write_paa(sheet, rows):
-    if not rows:
-        print("No PAA results to write.")
-        return
-    try:
-        ws = sheet.worksheet("PAA")
-    except:
-        ws = sheet.add_worksheet(title="PAA", rows="1000", cols="7")
-
-    ws.clear()
-    time.sleep(2)  # Brief pause after clear
-
-    header = [["Keyword", "Country_Code", "Rank", "Question", "Snippet", "Source", "Source_URL"]]
-    batch  = [
-        [r["keyword"], r["country_code"], r["rank"],
-         r["question"], r["snippet"], r["source"], r["source_url"]]
-        for r in rows
-    ]
-
-    ws.append_rows(header + batch, value_input_option="RAW")  # ✅ Single API call
-    print(f"✅ PAA tab: {len(rows)} rows written.")
 
 # ==============================
 # MAIN
 # ==============================
 
 def main():
-    sheet        = connect_google_sheet()
-    keyword_data = read_keywords(sheet)
+    keyword_data = [
+    {"Keyword": "heart surgery cost in india", "Country_Code": "US"},
+    ]
+    run_id = 1  # temporary, will replace later
 
     all_urls = []
     all_paa  = []
@@ -172,13 +98,18 @@ def main():
         for r in paa:
             all_paa.append({"keyword": keyword, "country_code": country_code, **r})
 
-    write_urls(sheet, all_urls)
+    save_serp_urls(run_id, all_urls)
+    save_paa_questions(run_id, all_paa)
+    
+    print("\nURLs:")
+    for row in all_urls[:3]:
+        print(row)
 
-    time.sleep(5)  # ✅ Wait between writing the two tabs to avoid rate limit
+    print("\nPAA:")
+    for row in all_paa[:3]:
+        print(row)
 
-    write_paa(sheet, all_paa)
-
-    print("\n✅ Google Search Script Completed! (1 API call per keyword → Serp_Url + PAA tabs)")
+    print("\n✅ Google Search Script Completed! (1 API call per keyword → URLs + PAA collected)")
 
 if __name__ == "__main__":
     main()
