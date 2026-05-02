@@ -43,9 +43,20 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
         # print(f"[debug] stages exists={(ROOT / 'stages').exists()}", flush=True)
         # print(f"[debug] sys.path[0:3]={sys.path[:3]}", flush=True)
 
-        import importlib
-        importlib.import_module("stages.runner")
-        print("[debug] import stages.runner SUCCESS", flush=True)
+        from pathlib import Path
+        import sys
+
+        ROOT = Path(__file__).resolve().parent.parent
+        STAGES_PATH = ROOT / "stages"
+
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+
+        if str(STAGES_PATH) not in sys.path:
+            sys.path.insert(0, str(STAGES_PATH))
+
+        # direct import now
+        from runner import run_stage
 
     except Exception as e:
         print(f"[debug] import failed: {e}", flush=True)

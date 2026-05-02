@@ -12,28 +12,18 @@ except ImportError:
 from stages.cells.cell_23_shared_utils import *
 
 # ─── CELL: H1 / Meta Title / Meta Description Generator ──────────────
-import json, time, re
-import gspread
+import json, time, re, os
+from psycopg2.extras import Json
 from google import genai
-from app.utils.helper import get_sheet_client
 from google.genai import types
 
-SHEET_NAME   = SPREADSHEET_NAME
-KEYWORD_TAB  = "keyword"
-URL_DATA_TAB = "Url_data_ext"
-PAA_TAB      = "PAA"
-OUTPUT_TAB   = "H1_Meta_Output"
-
+from app.database import fetch_all, execute
+from app.repositories.run_repo import get_run_keywords
+from app.storage import r2_put_text
 
 GEMINI_MODEL      = "gemini-2.5-flash"
 MAX_CELL          = 49000
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [
@@ -57,36 +47,6 @@ COUNTRY_MAP = {
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            wait = 4 * (attempt + 1)
-            if attempt < retries - 1:
-                time.sleep(wait)
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60}
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=200, cols=10):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
 
 def call_gemini(prompt, max_tokens=4000):
     for attempt in range(3):
@@ -229,17 +189,25 @@ def extract_h1_block(text):
 # DATA LOADERS
 # ═══════════════════════════════════════════════════════════════
 
-def build_article_brief(sp):
-    ws = sp.worksheet(KEYWORD_TAB)
-    records = ws.get_all_records()
+def current_run_id() -> int:
+    run_id_raw = os.getenv("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    return int(run_id_raw)
+
+
+def build_article_brief(run_id: int):
+    records = get_run_keywords(run_id)
     if not records:
         return None
 
     keyword_freq = {}
     country_codes = set()
+
     for r in records:
-        kw = str(r.get("Keyword", "")).strip()
-        cc = str(r.get("Country_Code", "")).strip().lower()
+        kw = str(r.get("keyword", "")).strip()
+        cc = str(r.get("country_code", "")).strip().lower()
+
         if kw:
             keyword_freq[kw] = keyword_freq.get(kw, 0) + 1
         if cc:
@@ -269,46 +237,99 @@ def build_article_brief(sp):
         "country_names": [c["name"] for c in target_countries],
         "country_codes_str": ", ".join(c["code"] for c in target_countries),
     }
+
     print(f"  📌 Primary keyword   : {primary}")
     print(f"  📌 Secondary keywords: {secondary}")
     print(f"  🌍 Target countries  : {[c['name'] for c in target_countries]}")
+
     return brief
 
 
-def load_all_competitor_h1s(sp):
-    try:
-        ws = sp.worksheet(URL_DATA_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_all_competitor_h1s(run_id: int):
+    records = fetch_all(
+        """
+        SELECT url, h1_data, meta_title
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
     h1_list = []
+
     for r in records:
-        h1_raw = str(r.get("H1_Data", "")).strip()
-        url = str(r.get("URL", "")).strip()
-        meta_title = str(r.get("Meta_Title", "")).strip()
+        h1_raw = str(r.get("h1_data", "") or "").strip()
+        url = str(r.get("url", "") or "").strip()
+        meta_title = str(r.get("meta_title", "") or "").strip()
+
         if h1_raw and h1_raw != "nan":
             for line in h1_raw.split("\n"):
-                line = re.sub(r'^\d+\.\s*', '', line).strip()
+                line = re.sub(r"^\d+\.\s*", "", line).strip()
                 if line and len(line) > 5:
-                    h1_list.append({"h1": line, "url": url, "meta_title": meta_title})
+                    h1_list.append({
+                        "h1": line,
+                        "url": url,
+                        "meta_title": meta_title,
+                    })
+
     return h1_list
 
 
-def load_all_paa(sp):
-    try:
-        ws = sp.worksheet(PAA_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_all_paa(run_id: int):
+    records = fetch_all(
+        """
+        SELECT question
+        FROM paa_questions
+        WHERE run_id = %s
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
     questions = []
     seen = set()
+
     for r in records:
-        q = str(r.get("Question", "")).strip()
+        q = str(r.get("question", "") or "").strip()
         if q and q.lower() not in seen:
             questions.append(q)
             seen.add(q.lower())
+
     return questions
 
+
+def save_h1_meta_output(run_id: int, output_text: str, metadata: dict) -> str:
+    r2_key = f"blog/{run_id}/h1_meta.md"
+
+    r2_put_text(r2_key, output_text)
+
+    execute(
+        """
+        DELETE FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        """,
+        (run_id, "h1_meta"),
+    )
+
+    execute(
+        """
+        INSERT INTO generated_outputs (
+            run_id, output_type, r2_key, metadata_json
+        )
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            run_id,
+            "h1_meta",
+            r2_key,
+            Json(metadata),
+        ),
+    )
+
+    return r2_key
 
 # ═══════════════════════════════════════════════════════════════
 # PROMPT BUILDERS
@@ -443,60 +464,56 @@ print("🏷️  H1 / META TITLE / META DESCRIPTION GENERATOR")
 print("   Mode: SINGLE ARTICLE — all keywords merged")
 print("="*65)
 
-sp = gc.open(SHEET_NAME)
+run_id = current_run_id()
 
-print(f"\n📋 Building article brief from '{KEYWORD_TAB}' tab...")
-brief = build_article_brief(sp)
+print("\n📋 Building article brief from DB run keywords...")
+brief = build_article_brief(run_id)
 
 if not brief:
-    print("❌ No keywords found in keyword tab.")
+    print("❌ No keywords found for this run.")
 else:
-    print(f"\n📊 Loading competitor data...")
-    comp_h1s = load_all_competitor_h1s(sp)
-    paa_qs   = load_all_paa(sp)
+    print("\n📊 Loading competitor + PAA data from DB...")
+    comp_h1s = load_all_competitor_h1s(run_id)
+    paa_qs = load_all_paa(run_id)
+
     print(f"  Competitor H1s: {len(comp_h1s)} | PAA questions: {len(paa_qs)}")
 
-    # Build comp_meta_block for Call 2
-    raw_meta_titles = [h["meta_title"] for h in comp_h1s
-                       if h.get("meta_title") and h["meta_title"] not in ("nan", "(not found)", "")]
+    raw_meta_titles = [
+        h["meta_title"]
+        for h in comp_h1s
+        if h.get("meta_title") and h["meta_title"] not in ("nan", "(not found)", "")
+    ]
+
     comp_meta_block = ""
     if raw_meta_titles:
         comp_meta_block = "COMPETITOR META TITLES:\n"
         for i, mt in enumerate(raw_meta_titles[:5], 1):
             comp_meta_block += f'  {i}. "{mt[:80]}"\n'
 
-    # Call 1: H1 options
-    print(f"\n🤖 Call 1: Generating H1 options...")
+    print("\n🤖 Call 1: Generating H1 options...")
     h1_prompt = build_h1_meta_prompt(brief, comp_h1s, paa_qs)
     h1_result = call_gemini(h1_prompt, max_tokens=4000)
     time.sleep(3)
 
-    # Call 2: Meta Title + Description
-    print(f"🤖 Call 2: Generating Meta Title + Description...")
+    print("🤖 Call 2: Generating Meta Title + Description...")
     meta_prompt = build_meta_only_prompt(brief, h1_result, comp_meta_block)
     meta_result = call_gemini(meta_prompt, max_tokens=8000)
 
     if not h1_result and not meta_result:
         print("  ⚠️ Both Gemini calls returned empty")
     else:
-        # ── Parse h1_result for intent + H1 block ────────────────────
-        intent   = extract_intent_from_h1(h1_result)
+        intent = extract_intent_from_h1(h1_result)
         h1_block = extract_h1_block(h1_result)
 
-        # ── Parse meta_result with robust state-machine parser ────────
-        # This handles ALL Gemini output variations: plain text, **bold**,
-        # ## markdown, with/without OPTIONS word, RECOMMENDED/RECOMMENDED COMBINATION
-        meta_parsed      = parse_meta_result(meta_result)
+        meta_parsed = parse_meta_result(meta_result)
         meta_title_block = meta_parsed["meta_titles"]
-        meta_desc_block  = meta_parsed["meta_descriptions"]
-        recommended      = meta_parsed["recommended"]
+        meta_desc_block = meta_parsed["meta_descriptions"]
+        recommended = meta_parsed["recommended"]
 
-        # ── Debug: show raw meta_result if any section still empty ────
         if not meta_desc_block or not recommended:
             print(f"\n  ⚠️ Debug — full meta_result ({len(meta_result or '')} chars):")
             print(meta_result or "(empty)")
-            
-        # ── Construct labelled display blocks ────────────────────────
+
         if h1_block:
             h1_block = "H1 OPTIONS:\n" + h1_block
         if meta_title_block:
@@ -506,29 +523,45 @@ else:
         if recommended:
             recommended = "RECOMMENDED COMBINATION:\n" + recommended
 
-        # ── Write to sheet ────────────────────────────────────────────
-        out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=20, cols=10)
-        HEADERS = [
-            "Primary_Keyword", "Secondary_Keywords", "Target_Countries",
-            "Intent", "H1_Options", "Meta_Title_Options",
-            "Meta_Description_Options", "Recommended_Combination",
-        ]
-        rows_out = [
-            HEADERS,
-            [
-                brief["primary_keyword"],
-                ", ".join(brief["secondary_keywords"]),
-                ", ".join(brief["country_names"]),
-                _trunc(intent),
-                _trunc(h1_block),
-                _trunc(meta_title_block),
-                _trunc(meta_desc_block),
-                _trunc(recommended),
-            ],
-        ]
+        output_text = f"""# H1 / Meta Output
 
-        _write_with_retry(out_ws, rows_out)
-        _fmt_header(out_ws, len(HEADERS))
+Primary Keyword     : {brief["primary_keyword"]}
+Secondary Keywords  : {", ".join(brief["secondary_keywords"])}
+Target Countries    : {", ".join(brief["country_names"])}
+
+## Intent
+
+{intent}
+
+## H1 Options
+
+{h1_block}
+
+## Meta Title Options
+
+{meta_title_block}
+
+## Meta Description Options
+
+{meta_desc_block}
+
+## Recommended Combination
+
+{recommended}
+"""
+
+        metadata = {
+            "primary_keyword"   : brief["primary_keyword"],
+            "secondary_keywords": brief["secondary_keywords"],
+            "target_countries"  : brief["country_names"],
+            "intent"            : intent,
+        }
+
+        r2_key = save_h1_meta_output(
+            run_id=run_id,
+            output_text=output_text,
+            metadata=metadata,
+        )
 
         print(f"\n  ✅ Intent          : {intent[:60] or '⚠️ empty'}")
         print(f"  ✅ H1 options      : {'✅' if h1_block else '⚠️ empty'}")
@@ -536,9 +569,8 @@ else:
         print(f"  ✅ Meta desc       : {'✅' if meta_desc_block else '⚠️ empty'}")
         print(f"  ✅ Recommended     : {'✅' if recommended else '⚠️ empty'}")
         print(f"\n{'='*65}")
-        print(f"✅ H1/META GENERATOR COMPLETE")
+        print("✅ H1/META GENERATOR COMPLETE")
         print(f"   Primary keyword : {brief['primary_keyword']}")
         print(f"   Target countries: {', '.join(brief['country_names'])}")
-        print(f"   Output tab      : '{OUTPUT_TAB}' in '{SHEET_NAME}'")
+        print(f"   R2 output       : {r2_key}")
         print(f"{'='*65}")
-
