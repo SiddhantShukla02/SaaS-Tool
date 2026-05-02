@@ -60,7 +60,7 @@ def mark_final_url_ready(run_id: int, user: str = "anonymous"):
             f"expected '{db.STATUS_AWAITING_FINAL_URL}'"
         )
     db.log(run_id, "info", f"Final_URL marked ready by {user}")
-    _queue_stage(run_id, "stage_3_blog", db.STATUS_STAGE3_RUNNING)
+    _queue_stage(run_id, "stage_2_context", db.STATUS_STAGE2_RUNNING)
 
 
 def start_question_bank(run_id: int):
@@ -160,17 +160,19 @@ def on_stage_finished(run_id: int, stage_name: str,
     if stage_name == "stage_1_serp_paa":
         db.update_status(run_id, db.STATUS_AWAITING_FINAL_URL)
         db.log(run_id, "info", "Stage 1 complete — waiting for URL selection")
+
     elif stage_name == "stage_2_context":
-        db.update_status(run_id, db.STATUS_AWAITING_FINAL_URL)
-        db.log(run_id, "info",
-                "Stage 2 done — waiting for user to curate Final_URL tab "
-                "and click 'Final_URL ready'")
+        db.log(run_id, "info", "Stage 2 complete — starting blog writing")
+        _queue_stage(run_id, "stage_3_blog", db.STATUS_STAGE3_RUNNING)
+
     elif stage_name == "stage_3_blog":
         db.update_status(run_id, db.STATUS_BLOG_READY)
         db.log(run_id, "info", "Blog ready")
+
     elif stage_name == "stage_4_bank":
         db.update_status(run_id, db.STATUS_BANK_READY)
         db.log(run_id, "info", "Question Bank ready")
+
     elif stage_name == "stage_5_drafts":
         db.update_status(run_id, db.STATUS_COMPLETE)
         db.log(run_id, "info", "Run complete")

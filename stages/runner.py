@@ -82,6 +82,7 @@ STAGE_CELLS = {
         "cell_07_related.py",
     ],
     "stage_2_context": [
+        "cell_10_competitor_context.py",
         "cell_16_reddit.py",
         "cell_18_brave_forum.py",
         "cell_20_forum_combine.py",
@@ -89,9 +90,6 @@ STAGE_CELLS = {
     ],
     "stage_3_blog": [
         "cell_01_env_config.py",
-        "cell_09_scraper.py",
-        "cell_12_meta_title.py",
-        "cell_14_keyword_extractor.py",
         "cell_23_shared_utils.py",
         "cell_25_h1_meta.py",
         "cell_27_outline.py",
@@ -128,6 +126,7 @@ def run_stage(stage_name: str, run_id: int,
         }
 
     os.environ["SAAS_RUN_ID"] = str(run_id)
+    os.environ["RUN_ID"] = str(run_id)
     outputs = []
     started = time.time()
 

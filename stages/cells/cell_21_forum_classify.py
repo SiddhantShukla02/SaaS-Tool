@@ -24,33 +24,28 @@ except ImportError:
 # Forum_Master_MD has one row per category + an ALL_CATEGORIES row which is a
 # drop-in replacement for Reddit_Insights_MD in Cells 21, 23, 25, and 31.
 # ─────────────────────────────────────────────────────────────────────
-
+import os
+from app.database import fetch_all
 import json
 import math
 import re
 import time
 from collections import Counter, defaultdict
-import gspread
 from google import genai
 from google.genai import types
-from app.utils.helper import get_sheet_client
+
+from app.storage import r2_put_text
+from app.repositories.search_repo import (
+    insert_forum_master_insight,
+    insert_forum_master_md,
+)
 
 # ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME    = SPREADSHEET_NAME
-SOURCE_TAB    = "Forum_Master_Raw"
-OUTPUT_TAB    = "Forum_Master_Insights"
-MD_OUTPUT_TAB = "Forum_Master_MD"
-
 
 GEMINI_MODEL   = "gemini-2.5-flash"
 
 MAX_CELL   = 49000
 BATCH_SIZE = 20     # rows per Gemini call
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
 INSIGHT_CATEGORIES = [
     "Emotional_Hook", "Patient_Question", "Objection", "Trust_Signal",
@@ -68,7 +63,6 @@ EMOTION_INTENSITY = {
 HIGH_VALUE_CATEGORIES = {"Content_Gap", "Objection", "Country_Pain_Point"}
 
 # ── Auth ──────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [
@@ -83,37 +77,6 @@ SAFETY_OFF = [
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            wait = 4 * (attempt + 1)
-            if attempt < retries - 1:
-                print(f"    ⚠️  Write attempt {attempt+1}/{retries} failed: {e} — retry in {wait}s")
-                time.sleep(wait)
-            else:
-                print(f"    ❌ Write failed: {e}")
-                return False
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60},
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=5000, cols=15):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
 
 # ── Gemini call ───────────────────────────────────────────────────────
 def call_gemini(prompt: str, max_tokens: int = 8000) -> str:
@@ -306,18 +269,19 @@ def main():
     print("\n" + "="*60)
     print("🤖 CELL B — GEMINI INSIGHT EXTRACTOR")
     print("="*60)
-    sp = gc.open(SHEET_NAME)
 
-    try:
-        ws_src  = sp.worksheet(SOURCE_TAB)
-        records = ws_src.get_all_records()
-    except gspread.WorksheetNotFound:
-        print(f"❌ Tab '{SOURCE_TAB}' not found. Run Cell A first.")
-        return
+    run_id = int(os.environ.get("RUN_ID"))
+
+    records = fetch_all(
+        "SELECT * FROM forum_master_raw WHERE run_id = %s",
+        (run_id,),
+    )
+
     if not records:
-        print(f"❌ Tab '{SOURCE_TAB}' is empty. Run Cell A first.")
+        print("❌ No forum_master_raw data found. Run previous cells first.")
         return
-    print(f"📥 Loaded {len(records)} rows from '{SOURCE_TAB}'")
+
+    print(f"📥 Loaded {len(records)} rows from DB (forum_master_raw)")
 
     classified_rows = []
     total_batches   = math.ceil(len(records) / BATCH_SIZE)
@@ -360,42 +324,59 @@ def main():
 
     print(f"\n✅ Classification complete: {len(classified_rows)} rows")
 
-    # Write Forum_Master_Insights
-    headers_insights = [
-        "Source", "Detected_Country", "Insight_Type", "Journey_Stage",
-        "Clean_Insight", "Emotion_Tags", "Priority_Score",
-        "Insight_Text", "Upvotes", "URL", "Raw_Title",
-    ]
-    ws_insights = get_or_create_tab(sp, OUTPUT_TAB, rows=len(classified_rows)+20, cols=len(headers_insights))
-    insights_data = [headers_insights]
-    for row in classified_rows:
-        insights_data.append([
-            _trunc(row["Source"]),         _trunc(row["Detected_Country"]),
-            _trunc(row["Insight_Type"]),   _trunc(row["Journey_Stage"]),
-            _trunc(row["Clean_Insight"]),  _trunc(row["Emotion_Tags"]),
-            str(row["Priority_Score"]),    _trunc(row["Insight_Text"]),
-            str(row["Upvotes"]),           _trunc(row["URL"]),
-            _trunc(row["Raw_Title"]),
-        ])
-    if _write_with_retry(ws_insights, insights_data):
-        _fmt_header(ws_insights, len(headers_insights))
-        print(f"  📊 '{OUTPUT_TAB}' written: {len(classified_rows)} rows × {len(headers_insights)} cols")
+    # Write Forum_Master_Insights to DB
+    print("\n💾 Saving Forum_Master_Insights to DB...")
 
-    # Write Forum_Master_MD
-    md_blocks  = build_master_md(classified_rows)
-    headers_md = ["Insight_Type", "Row_Count", "Prompt_Ready_Markdown"]
-    ws_md      = get_or_create_tab(sp, MD_OUTPUT_TAB, rows=len(INSIGHT_CATEGORIES)+5, cols=3)
-    md_data    = [headers_md]
+    for row in classified_rows:
+        insert_forum_master_insight(
+            run_id=run_id,
+            source=_trunc(row["Source"]),
+            detected_country=_trunc(row["Detected_Country"]),
+            insight_type=_trunc(row["Insight_Type"]),
+            journey_stage=_trunc(row["Journey_Stage"]),
+            clean_insight=_trunc(row["Clean_Insight"]),
+            emotion_tags=_trunc(row["Emotion_Tags"]),
+            priority_score=int(row["Priority_Score"] or 0),
+            insight_text=_trunc(row["Insight_Text"]),
+            upvotes=int(row["Upvotes"] or 0),
+            url=_trunc(row["URL"]),
+            raw_title=_trunc(row["Raw_Title"]),
+        )
+
+    print(f"  📊 Forum_Master_Insights saved: {len(classified_rows)} rows")
+
+    # Write Forum_Master_MD to R2 + DB pointers
+    print("\n💾 Saving Forum_Master_MD to R2 + DB...")
+
+    md_blocks = build_master_md(classified_rows)
+
     for cat in INSIGHT_CATEGORIES:
-        if cat in md_blocks:
-            block     = md_blocks[cat]
-            row_count = block.count("\n- ")
-            md_data.append([cat, str(row_count), _trunc(block)])
+        if cat not in md_blocks:
+            continue
+
+        block = md_blocks[cat]
+        r2_key = f"forum/{run_id}/master_md/{cat}.md"
+
+        r2_put_text(r2_key, block)
+
+        insert_forum_master_md(
+            run_id=run_id,
+            insight_type=cat,
+            r2_key=r2_key,
+        )
+
     full_md = md_blocks.get("ALL_CATEGORIES", "")
-    md_data.append(["ALL_CATEGORIES", str(len(classified_rows)), _trunc(full_md)])
-    if _write_with_retry(ws_md, md_data):
-        _fmt_header(ws_md, 3)
-        print(f"  📝 '{MD_OUTPUT_TAB}' written: {len(md_data)-1} category blocks")
+    r2_key = f"forum/{run_id}/master_md/ALL_CATEGORIES.md"
+
+    r2_put_text(r2_key, full_md)
+
+    insert_forum_master_md(
+        run_id=run_id,
+        insight_type="ALL_CATEGORIES",
+        r2_key=r2_key,
+    )
+
+    print(f"  📝 Forum_Master_MD saved to R2 + DB pointers")
 
     # Summary
     print("\n" + "="*60)

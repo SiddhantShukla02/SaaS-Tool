@@ -69,8 +69,8 @@ STATUS_LABELS = {
     db.STATUS_DRAFT:              ("Draft", "pill-draft"),
     db.STATUS_STAGE1_RUNNING:     ("Stage 1 running", "pill-running"),
     db.STATUS_STAGE2_RUNNING:     ("Stage 2 running", "pill-running"),
-    db.STATUS_AWAITING_FINAL_URL: ("Awaiting Final_URL", "pill-gate"),
-    db.STATUS_STAGE3_RUNNING:     ("Stage 3 running (blog)", "pill-running"),
+    db.STATUS_AWAITING_FINAL_URL: ("Awaiting URL selection", "pill-gate"),
+    db.STATUS_STAGE3_RUNNING:     ("Stage 3 running (Blog writing)", "pill-running"),
     db.STATUS_BLOG_READY:         ("Blog ready", "pill-done"),
     db.STATUS_BANK_RUNNING:       ("Building question bank", "pill-running"),
     db.STATUS_BANK_READY:         ("Question bank ready", "pill-done"),
@@ -171,11 +171,11 @@ def render_run_detail(run_id: int):
     st.markdown("#### Pipeline progress")
     execs = db.get_stage_executions(run_id)
     STAGE_DISPLAY = {
-        "stage_1_serp_paa": "Stage 1 — SERP + PAA (Cell 3)",
-        "stage_2_context":  "Stage 2 — Context (Cells 5,7,16,18,20,21)",
-        "stage_3_blog":     "Stage 3 — Blog (Cells 9,12,14,25,27,29,33)",
-        "stage_4_bank":     "Stage 4 — Question Bank (Cell A)",
-        "stage_5_drafts":   "Stage 5 — Platform Drafts (Cell B)",
+        "stage_1_serp_paa": "Stage 1 — Search discovery (Cells 1,3,5,7)",
+        "stage_2_context":  "Stage 2 — Context build (Competitor + Forums)",
+        "stage_3_blog":     "Stage 3 — Blog writing (Cells 23,25,27,29,31,33)",
+        "stage_4_bank":     "Stage 4 — Question Bank",
+        "stage_5_drafts":   "Stage 5 — Platform Drafts",
     }
     if not execs:
         st.info("No stages have run yet.")
@@ -198,7 +198,7 @@ def render_run_detail(run_id: int):
         st.markdown(
             '<div class="gate-box"><strong>Action needed:</strong> '
             'Select or paste the competitor URLs you want to use. '
-            'These will be saved to the database before the next stage runs.'
+            'These will be saved to the database before context extraction runs.'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -221,7 +221,7 @@ def render_run_detail(run_id: int):
         )
         col_a, col_b = st.columns([1, 1])
         with col_a:
-            if st.button("✓ Final_URL ready, run Stage 3", type="primary",
+            if st.button("✓ URLs ready, run Stage 2 - Context build", type="primary",
                         use_container_width=True):
                 try:
                     manual_urls = [
@@ -237,7 +237,7 @@ def render_run_detail(run_id: int):
                     else:
                         save_selected_urls(run_id, final_urls)
                         orchestrator.mark_final_url_ready(run_id, auth.current_user())
-                        st.success("URLs saved. Stage 3 queued!")
+                        st.success("URLs saved. Stage 2 - Context build is queued!")
                         st.rerun()
 
                 except Exception as e:
@@ -319,7 +319,7 @@ def render_run_detail(run_id: int):
     if not activity:
         st.caption("No activity yet.")
     else:
-        for a in reversed(activity):
+        for a in (activity):
             prefix = {"error": "🔴", "warn": "🟡", "info": "·"}.get(a["level"], "·")
             timestamp_text = str(a["timestamp"])
             ts = timestamp_text.split("T")[1][:8] if "T" in timestamp_text else timestamp_text[11:19]
@@ -359,9 +359,8 @@ def render_dashboard():
     # New run form
     with st.expander("➕ Start new run", expanded=not bool(db.list_runs(limit=1))):
         st.markdown(
-            "**Step 1 (manual):** In your Google Sheet (`Keyword_n8n`), open the "
-            "`keyword` tab and add the keyword + target country codes. "
-            "**Step 2:** Fill in below and click Start."
+            "**Step 1:** Enter keyword + target countries below.  \n"
+            "**Step 2:** Click Start to begin Stage 1 - Search discovery."
         )
         with st.form("new_run"):
             keyword = st.text_input(

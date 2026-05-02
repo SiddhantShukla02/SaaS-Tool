@@ -18,12 +18,16 @@ def get_db_conn():
 
     try:
         yield conn
-        conn.commit()
+        if not conn.closed:
+            conn.commit()
+
     except Exception:
-        conn.rollback()
+        if not conn.closed:
+            conn.rollback()
         raise
     finally:
-        conn.close()
+        if not conn.closed:
+            conn.close()
 
 
 def fetch_all(sql: str, params: tuple = ()):

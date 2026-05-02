@@ -13,12 +13,18 @@ Public surface:
 """
 
 import os
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 BACKEND = os.environ.get("SAAS_QUEUE_BACKEND", "thread").lower()
 
+ROOT = Path(__file__).resolve().parent.parent
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # ─────────────────────────────────────────────────────────────
 # Job function — what a worker actually runs
@@ -30,6 +36,22 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
     Pulls in heavy deps only inside the function so the UI process doesn't
     load gspread/google-genai unnecessarily.
     """
+
+    try:
+        # print(f"[debug] cwd={os.getcwd()}", flush=True)
+        # print(f"[debug] ROOT={ROOT}", flush=True)
+        # print(f"[debug] stages exists={(ROOT / 'stages').exists()}", flush=True)
+        # print(f"[debug] sys.path[0:3]={sys.path[:3]}", flush=True)
+
+        import importlib
+        importlib.import_module("stages.runner")
+        print("[debug] import stages.runner SUCCESS", flush=True)
+
+    except Exception as e:
+        print(f"[debug] import failed: {e}", flush=True)
+        raise
+
+
     from stages.runner import run_stage
     from app import orchestrator
     from app.repositories import state_repo as db

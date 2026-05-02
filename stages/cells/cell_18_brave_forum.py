@@ -31,26 +31,12 @@ import requests
 import json
 import time
 import os
-import gspread
-# ─── PATCHED v16.1: Brave key from config ────
-from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
-# ─────────────────────────────────────────────
 
-from app.utils.helper import get_sheet_client
 # ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME        = SPREADSHEET_NAME
-INPUT_TAB         = "keyword"
-OUTPUT_TAB        = "Google_Forum_Insights"
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
+from config import BRAVE_API_KEY
 MAX_CELL = 49000
 
 # ── Auth ──────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 
 class BraveForumSearchCollector:
     """Collects patient discussions from Quora, forums, and review sites via Brave Search API."""
@@ -226,24 +212,26 @@ else:
     print("🔍 BRAVE FORUM SEARCH COLLECTOR")
     print("="*65)
 
-    sp = gc.open(SHEET_NAME)
-    ws_kw = sp.worksheet(INPUT_TAB)
-    records = ws_kw.get_all_records()
+    from app.repositories.run_repo import get_run_keywords
+
+    run_id = int(os.environ.get("RUN_ID"))
+    records = get_run_keywords(run_id)
 
     collector = BraveForumSearchCollector(
         api_key=BRAVE_API_KEY,
     )
 
-    out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=1000, cols=6)
-    HEADERS = ["Keyword", "Source_Type", "Title", "Snippet", "URL", "Display_Link"]
-    rows_out = [HEADERS]
+    from app.repositories.search_repo import insert_forum_search_result
+
+    print(f"\n💾 Saving forum search results to DB...")
 
     for row in records:
-        keyword = str(row.get("Keyword", "")).strip()
+        keyword = str(row.get("keyword", "")).strip()
         if not keyword:
             continue
 
         print(f"\n  Keyword: '{keyword}'")
+
         results = collector.collect_from_sources(
             keyword=keyword,
             sources=["quora", "forums", "reviews"],
@@ -251,18 +239,16 @@ else:
         )
 
         for r in results["results"]:
-            rows_out.append([
-                keyword,
-                r["source_type"],
-                _trunc(r["title"]),
-                _trunc(r["snippet"]),
-                r["url"],
-                r["source"],
-            ])
-
-    _write_with_retry(out_ws, rows_out)
-    _fmt_header(out_ws, len(HEADERS))
+            insert_forum_search_result(
+                run_id=run_id,
+                keyword=keyword,
+                source_type=r["source_type"],
+                title=_trunc(r["title"]),
+                snippet=_trunc(r["snippet"]),
+                url=r["url"],
+                display_link=r["source"],
+            )
 
     print(f"\n{'='*65}")
-    print(f"✅ BRAVE FORUM SEARCH COMPLETE — {len(rows_out)-1} results in '{OUTPUT_TAB}'")
+    print(f"✅ BRAVE FORUM SEARCH COMPLETE")
     print(f"{'='*65}")
