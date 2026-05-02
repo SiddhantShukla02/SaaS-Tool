@@ -43,3 +43,16 @@ def get_run_keywords(run_id: int) -> list[dict]:
         """,
         (run_id,),
     )
+
+def get_run_country_codes(run_id: int) -> list[str]:
+    rows = fetch_all(
+        """
+        SELECT DISTINCT country_code
+        FROM run_keywords
+        WHERE run_id = %s
+        ORDER BY country_code ASC
+        """,
+        (run_id,),
+    )
+
+    return [row["country_code"] for row in rows]

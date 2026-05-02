@@ -17,7 +17,7 @@ import contextlib
 import io
 from pathlib import Path
 from typing import Callable
-from app import db
+from app.repositories import state_repo as db
 
 # Make the project root importable so cells can `from config import ...`
 ROOT = Path(__file__).parent.parent.resolve()
@@ -78,11 +78,10 @@ STAGE_CELLS = {
     "stage_1_serp_paa": [
         "cell_01_env_config.py",
         "cell_03_serp_paa.py",
-    ],
-    "stage_2_context": [
-        "cell_01_env_config.py",
         "cell_05_autocomplete.py",
         "cell_07_related.py",
+    ],
+    "stage_2_context": [
         "cell_16_reddit.py",
         "cell_18_brave_forum.py",
         "cell_20_forum_combine.py",

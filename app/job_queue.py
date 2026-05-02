@@ -31,7 +31,8 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
     load gspread/google-genai unnecessarily.
     """
     from stages.runner import run_stage
-    from app import db, orchestrator
+    from app import orchestrator
+    from app.repositories import state_repo as db
 
     def progress_cb(line: str):
         print(f"[run {run_id}] {line}", flush=True)

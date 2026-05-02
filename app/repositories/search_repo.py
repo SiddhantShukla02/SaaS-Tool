@@ -105,3 +105,39 @@ def save_related_searches(run_id: int, rows: list[dict]) -> None:
     """
 
     insert_many(sql, values)
+
+def save_selected_urls(run_id: int, urls: list[str]) -> None:
+    if not urls:
+        return
+
+    values = [
+        (
+            run_id,
+            url,
+            "manual",
+            position,
+        )
+        for position, url in enumerate(urls, start=1)
+    ]
+
+    sql = """
+        INSERT INTO selected_urls
+            (run_id, url, source, position)
+        VALUES %s
+    """
+
+    insert_many(sql, values)
+
+
+def get_serp_urls_for_run(run_id: int) -> list[dict]:
+    from app.database import fetch_all
+
+    return fetch_all(
+        """
+        SELECT id, keyword, country_code, rank, url
+        FROM serp_results
+        WHERE run_id = %s
+        ORDER BY keyword ASC, rank ASC
+        """,
+        (run_id,),
+    )

@@ -27,10 +27,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-from app import db, orchestrator, auth          # noqa: E402
-
-# Initialise DB on first load
-db.init_db()
+from app import orchestrator, auth          # noqa: E402
+from app.repositories import state_repo as db
+from app.repositories.run_repo import get_run_country_codes
+from app.repositories.search_repo import get_serp_urls_for_run, save_selected_urls
 
 # Require login
 auth.require_auth()
@@ -139,10 +139,10 @@ def render_run_detail(run_id: int):
     # Title + status
     col_l, col_r = st.columns([5, 1])
     with col_l:
-        st.markdown(f"### {run['keyword']}")
+        st.markdown(f"### {run['primary_keyword']}")
         st.caption(
             f"Run #{run['id']} · created by {run['created_by']} · "
-            f"{run['created_at'].replace('T', ' ')}"
+            f"{str(run['created_at']).replace('T', ' ')}"
         )
     with col_r:
         st.markdown(status_pill(run["status"]), unsafe_allow_html=True)
@@ -150,9 +150,10 @@ def render_run_detail(run_id: int):
     # Info tiles
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Target countries", ", ".join(run["countries"]) or "—")
+        country_codes = get_run_country_codes(run["id"])
+        st.metric("Target countries", ", ".join(country_codes) or "—")
     with m2:
-        st.metric("Estimated cost", f"${run['estimated_cost_usd']:.2f}")
+        st.metric("Run ID", f"#{run['id']}")
     with m3:
         blog_url = run.get("blog_doc_url")
         if blog_url:
@@ -196,20 +197,49 @@ def render_run_detail(run_id: int):
     if run["status"] == db.STATUS_AWAITING_FINAL_URL:
         st.markdown(
             '<div class="gate-box"><strong>Action needed:</strong> '
-            'open the Google Sheet, go to the Final_URL tab, paste the 5–8 '
-            'competitor URLs you want to use, and click the green button '
-            'when done. Stage 3 will then run automatically to blog completion.'
+            'Select or paste the competitor URLs you want to use. '
+            'These will be saved to the database before the next stage runs.'
             '</div>',
             unsafe_allow_html=True,
+        )
+
+        serp_rows = get_serp_urls_for_run(run_id)
+
+        st.markdown("##### SERP URLs found")
+
+        selected_from_serp = []
+
+        for row in serp_rows:
+            label = f"{row['rank']}. {row['url']}"
+            checked = st.checkbox(label, key=f"serp-url-{row['id']}")
+            if checked:
+                selected_from_serp.append(row["url"])
+
+        manual_urls_raw = st.text_area(
+            "Additional/manual URLs, one per line",
+            placeholder="https://example.com/page-1\nhttps://example.com/page-2",
         )
         col_a, col_b = st.columns([1, 1])
         with col_a:
             if st.button("✓ Final_URL ready, run Stage 3", type="primary",
-                          use_container_width=True):
+                        use_container_width=True):
                 try:
-                    orchestrator.mark_final_url_ready(run_id, auth.current_user())
-                    st.success("Stage 3 queued!")
-                    st.rerun()
+                    manual_urls = [
+                        url.strip()
+                        for url in manual_urls_raw.splitlines()
+                        if url.strip()
+                    ]
+
+                    final_urls = list(dict.fromkeys(selected_from_serp + manual_urls))
+
+                    if not final_urls:
+                        st.error("Please select or enter at least one URL.")
+                    else:
+                        save_selected_urls(run_id, final_urls)
+                        orchestrator.mark_final_url_ready(run_id, auth.current_user())
+                        st.success("URLs saved. Stage 3 queued!")
+                        st.rerun()
+
                 except Exception as e:
                     st.error(str(e))
         with col_b:
@@ -291,7 +321,8 @@ def render_run_detail(run_id: int):
     else:
         for a in reversed(activity):
             prefix = {"error": "🔴", "warn": "🟡", "info": "·"}.get(a["level"], "·")
-            ts = a["timestamp"].split("T")[1][:8] if "T" in a["timestamp"] else a["timestamp"]
+            timestamp_text = str(a["timestamp"])
+            ts = timestamp_text.split("T")[1][:8] if "T" in timestamp_text else timestamp_text[11:19]
 
             msg = a["message"]
 
@@ -369,10 +400,12 @@ def render_dashboard():
         with st.container():
             cols = st.columns([4, 1.5, 1])
             with cols[0]:
-                st.markdown(f"**{run['keyword']}**")
+                st.markdown(f"**{run['primary_keyword']}**")
+                country_codes = get_run_country_codes(run["id"])
+
                 st.caption(
-                    f"Run #{run['id']} · {', '.join(run['countries'])} · "
-                    f"{run['created_at'].replace('T', ' ')[:16]}"
+                    f"Run #{run['id']} · {', '.join(country_codes) or '—'} · "
+                    f"{str(run['created_at']).replace('T', ' ')[:16]}"
                 )
                 st.markdown(
                     progress_bar_html(orchestrator.progress_for_run(run['id'])),
@@ -380,7 +413,7 @@ def render_dashboard():
                 )
             with cols[1]:
                 st.markdown(status_pill(run["status"]), unsafe_allow_html=True)
-                st.caption(f"${run['estimated_cost_usd']:.2f}")
+                st.caption("")
             with cols[2]:
                 if st.button("Open", key=f"open-{run['id']}", use_container_width=True):
                     st.query_params["run"] = str(run["id"])
