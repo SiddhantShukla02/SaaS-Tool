@@ -26,6 +26,6 @@ RUN mkdir -p /app/data
 
 EXPOSE 8501
 
-# Default command runs the web UI. Use `docker run ... python -m app.queue`
+# Default command runs the web UI. Use `docker run ... python -m app.job_queue`
 # to run the worker process instead.
 CMD ["sh", "-c", "python -m streamlit run app/ui.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true"]
