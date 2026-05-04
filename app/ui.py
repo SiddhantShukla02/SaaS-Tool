@@ -155,9 +155,21 @@ def render_run_detail(run_id: int):
     with m2:
         st.metric("Run ID", f"#{run['id']}")
     with m3:
-        blog_url = run.get("blog_doc_url")
-        if blog_url:
-            st.markdown(f"**Blog:** [Open doc ↗]({blog_url})")
+        from app.database import fetch_one
+
+        blog_row = fetch_one(
+            """
+            SELECT r2_key
+            FROM generated_outputs
+            WHERE run_id = %s AND output_type = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (run["id"], "blog"),
+        )
+
+        if blog_row:
+            st.markdown(f"**Blog:** `{blog_row['r2_key']}`")
         else:
             st.markdown("**Blog:** *(not ready yet)*")
 
@@ -321,8 +333,17 @@ def render_run_detail(run_id: int):
     else:
         for a in (activity):
             prefix = {"error": "🔴", "warn": "🟡", "info": "·"}.get(a["level"], "·")
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
             timestamp_text = str(a["timestamp"])
-            ts = timestamp_text.split("T")[1][:8] if "T" in timestamp_text else timestamp_text[11:19]
+
+            try:
+                dt = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+                dt_ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+                ts = dt_ist.strftime("%H:%M:%S")
+            except Exception:
+                ts = timestamp_text[11:19]  # fallback
 
             msg = a["message"]
 
