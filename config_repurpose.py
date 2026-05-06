@@ -1,25 +1,29 @@
 """
 ═══════════════════════════════════════════════════════════════════════
-config_repurpose.py — Additional config for the Quora/Reddit/Substack
-                     repurposing pipeline.
+  config_repurpose.py — Repurposing Pipeline Configuration
+═══════════════════════════════════════════════════════════════════════
 
-Import this alongside config.py:
+  Additional configuration for Stage 5 repurposing outputs.
 
-    from config import *
-    from config_repurpose import *
+  Used by:
+    - cell_35_question_bank.py
+    - cell_37_platform_drafts.py
+
+  Contains:
+    - platform word-count/tone specs
+    - subreddit allowlist
+    - Reddit/Quora posting policies
+    - Substack draft settings
+    - question-bank filters
+    - question priority weights
+
+  Storage architecture:
+    - Draft outputs are saved to R2
+    - Output references are stored in Postgres
+    - Nothing is auto-published
+    - No Google Sheets dependency
 ═══════════════════════════════════════════════════════════════════════
 """
-
-# ═══════════════════════════════════════════════════════════════════════
-# NEW SHEET TABS — written by the repurposing pipeline
-# ═══════════════════════════════════════════════════════════════════════
-REPURPOSE_TABS = {
-    "question_bank":   "Question_Bank",        # unified, dedup'd question pool
-    "quora_drafts":    "Quora_Drafts",         # ready-to-review Quora answers
-    "reddit_drafts":   "Reddit_Drafts",        # ready-to-review Reddit posts/comments
-    "substack_drafts": "Substack_Drafts",      # ready-to-publish Substack essays
-    "publish_log":     "Repurpose_Publish_Log",  # tracks what's been posted where
-}
 
 # ═══════════════════════════════════════════════════════════════════════
 # PLATFORM — word-count targets by platform + intent
@@ -70,33 +74,32 @@ PLATFORM_SPECS = {
 SUBREDDIT_ALLOWLIST = {
     # by specialty — subreddits where answering medical-tourism questions
     # from a known industry account is welcome
-    "fertility":       [],  # e.g. "infertility", "IVF"
-    "cardiac":         [],  # research each before enabling
-    "orthopedic":      [],
-    "oncology":        [],
-    "ophthalmology":   [],
-    "dental":          [],
-    "bariatric":       [],
-    "cosmetic":        [],
-    "transplant":      [],
-    "Urology":         [],
-    "Gastroenterology":[],
-    "Gynecology":      [],
-    "Hematology":     [],
-    "Neuro":         [],
-    "ENT":         [],
-    "Vascular":         [],
-    "Rehabilitation":         [],
-    "Radiology":         [],
-    "Paediatric":         [],
-    "Orthopedics":         [],
-    "Organ Transplant":         [],
-    "Obstetrics":         [],
-    "Ophthalmology":         [],
-    "Nephrology":         [],
-    "Bariatric Surgery":         [],
-    "Metabolic Surgery":         [],
-    "general":         [],  # e.g. "MedicalTourism"
+    "fertility":            [],  # e.g. "infertility", "IVF"
+    "cardiac":              [],  # research each before enabling
+    "orthopedic":           [],
+    "oncology":             [],
+    "ophthalmology":        [],
+    "dental":               [],
+    "bariatric":            [],
+    "cosmetic":             [],
+    "transplant":           [],
+    "urology":              [],
+    "gastroenterology":     [],
+    "gynecology":           [],
+    "hematology":           [],
+    "neuro":                [],
+    "ENT":                  [],
+    "vascular":             [],
+    "rehabilitation":       [],
+    "radiology":            [],
+    "paediatric":           [],
+    "orthopedics":          [],
+    "organ Transplant":     [],
+    "obstetrics":           [],
+    "Nephrology":           [],
+    "Bariatric Surgery":    [],
+    "Metabolic Surgery":    [],
+    "general":              [],  # e.g. "MedicalTourism"
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -171,7 +174,7 @@ QUESTION_PRIORITY_WEIGHTS = {
 # ═══════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("✅ config_repurpose.py loaded")
-    print(f"   New sheet tabs      : {len(REPURPOSE_TABS)}")
+    print("   Storage            : R2 + Postgres")
     print(f"   Platforms configured: {', '.join(PLATFORM_SPECS.keys())}")
     allowlisted = sum(len(v) for v in SUBREDDIT_ALLOWLIST.values())
     print(f"   Subreddits allowed  : {allowlisted}")

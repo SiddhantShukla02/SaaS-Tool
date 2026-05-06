@@ -1,45 +1,44 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
-
-"""
-Reddit Medical Tourism Insights Collector
-==========================================
-Collects patient discussions from Reddit for SEO content enrichment.
-Uses Reddit's public JSON endpoints (no authentication required).
-
-Reads  : Keyword_n8n → "keyword" tab (Keyword + Country_Code)
-Writes : Keyword_n8n → "Reddit_Insights" tab
-Also   : Exports prompt-ready markdown to "Reddit_Insights_MD" tab
-
-Usage in notebook: just run this cell after Cells 1-5.
-"""
+# ─────────────────────────────────────────────────────────────
+# REDDIT INSIGHTS COLLECTOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Collects real patient discussions from Reddit to enrich
+#   SEO content with emotional signals, questions, and insights.
+#
+# INPUT:
+#   - run_keywords (Postgres)
+#     → keyword, country_code
+#
+# PROCESS:
+#   - Searches relevant subreddits + global Reddit
+#   - Fetches posts + top comments
+#   - Performs emotion analysis using keyword markers
+#   - Extracts real patient questions
+#   - Filters irrelevant content (topic + medical relevance)
+#
+# OUTPUT:
+#   - Raw insights → Postgres (reddit_insights table)
+#   - Prompt-ready markdown → R2 (forum/{run_id}/...)
+#   - R2 pointers → Postgres (reddit_markdown table)
+#
+# NOTES:
+#   - Uses public Reddit JSON API (no auth)
+#   - Includes rate limiting to avoid bans
+#   - High-signal input for Stage 4 (question bank)
+# ─────────────────────────────────────────────────────────────
 import os
-import requests
-import json
-import time
 import re
+import time
 from datetime import datetime
+
+import requests
+
 from app.repositories.run_repo import get_run_keywords
+from app.repositories.search_repo import (
+    insert_reddit_insight,
+    insert_reddit_markdown,
+)
 from app.storage import r2_put_text
-
-# ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME        = SPREADSHEET_NAME
-INPUT_TAB         = "keyword"
-OUTPUT_TAB        = "Reddit_Insights"
-OUTPUT_MD_TAB     = "Reddit_Insights_MD"
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
 # ── Reddit Collector Class ────────────────────────────────────────────
 
@@ -370,44 +369,12 @@ class RedditInsightsCollector:
         return "\n".join(lines)
 
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 MAX_CELL = 49000
 
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            wait = 4 * (attempt + 1)
-            if attempt < retries - 1:
-                print(f"  ⚠️ Retry {attempt+1}/{retries}: {e}")
-                time.sleep(wait)
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60}
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=3000, cols=10):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
-
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN EXECUTION
@@ -419,9 +386,6 @@ print("="*65)
 
 
 # ── Load keywords from DB ─────────────────────────────────────────────
-
-import os
-from app.repositories.run_repo import get_run_keywords
 
 run_id_raw = os.getenv("RUN_ID")
 if not run_id_raw:

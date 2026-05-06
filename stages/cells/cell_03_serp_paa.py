@@ -1,15 +1,35 @@
-from app.repositories.search_repo import save_serp_urls, save_paa_questions
-from config import SERP_API_KEY, EXCLUDED_DOMAINS
-from app.repositories.run_repo import get_run_keywords
+# ─────────────────────────────────────────────────────────────
+# SERP + PAA FETCHER
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Fetches Google SERP results and People Also Ask (PAA)
+#   questions for each keyword.
+#
+# INPUT:
+#   - run_keywords (Postgres)
+#     → keyword, country_code
+#
+# PROCESS:
+#   - Calls SERP API (1 call per keyword)
+#   - Extracts top organic URLs
+#   - Filters unwanted domains
+#   - Extracts PAA questions
+#
+# OUTPUT:
+#   - URLs → save_serp_urls
+#   - PAA   → save_paa_questions
+#
+# NOTES:
+#   - EXCLUDED_DOMAINS currently duplicated (pending design decision)
+# ─────────────────────────────────────────────────────────────
+
 import os
 
 import requests
-import time
-# ==============================
-# CONFIGURATION
-# ==============================
 
-
+from app.repositories.run_repo import get_run_keywords
+from app.repositories.search_repo import save_paa_questions, save_serp_urls
+from config import EXCLUDED_DOMAINS, SERP_API_KEY
 
 
 EXCLUDED_DOMAINS = [

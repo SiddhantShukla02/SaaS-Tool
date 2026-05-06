@@ -1,18 +1,25 @@
-# ═══════════════════════════════════════════════════════════════════════
-# ENV_CONFIG — Run FIRST before all other cells (v16.2 — full config import)
-# ═══════════════════════════════════════════════════════════════════════
-# Loads SECRETS from .env (4 API keys) and EVERYTHING ELSE from config.py
-# (brand, partner hospitals, internal links, citation allowlist, etc.)
+# ─────────────────────────────────────────────────────────────
+# ENV CONFIG
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Loads environment variables and shared configuration.
 #
-# SETUP:
-#   1. .env file in this folder with the 4 API keys:
-#        SERP_API_KEY=...
-#        GEMINI_API_KEY=...
-#        FIRECRAWL_API_KEY=...
-#        BRAVE_API_KEY=...
-#   2. config.py file in this folder (fill in sections 6-9 for best output)
-#   3. pip install python-dotenv
-# ═══════════════════════════════════════════════════════════════════════
+# INPUT:
+#   - .env (optional)
+#   - config.py
+#
+# PROCESS:
+#   - Loads environment variables
+#   - Imports all runtime config (keys, limits, personas, etc.)
+#   - Prints summary for visibility
+#
+# OUTPUT:
+#   - No direct output
+#   - Prepares environment for all subsequent cells
+#
+# NOTES:
+#   - Executed at start of each stage by runner
+# ─────────────────────────────────────────────────────────────
 
 # Load .env (secrets)
 try:
@@ -22,19 +29,18 @@ try:
 except ImportError:
     print("ℹ️  python-dotenv not installed; using system env vars only")
 
-# Ensure config.py in the notebook folder is importable
+# Ensure project root/config.py is importable
+import os
 import sys
 from pathlib import Path
+
 if str(Path.cwd()) not in sys.path:
     sys.path.insert(0, str(Path.cwd()))
 
-# ── Import EVERYTHING from config.py ──────────────────────────────
+# ── Import shared runtime configuration ──────────────────────────────
 from config import (
     # API keys (from .env via config.py's loader)
     SERP_API_KEY, GEMINI_API_KEY, FIRECRAWL_API_KEY, BRAVE_API_KEY,
-
-    # Google Sheets / Drive / Docs
-    SPREADSHEET_NAME, DOC_OUTPUT_TITLE, SCOPES, TABS,
 
     # Gemini model + limits
     GEMINI_MODEL, MAX_CELL, MAX_SCRAPE_CHARS, MAX_TOKENS, OUTLINE_TOKENS,
@@ -92,7 +98,7 @@ citation_count = _count_citations(CITATION_ALLOWLIST)
 
 print(f"✅ config.py loaded")
 print(f"   Brand              : {BRAND['name']} ({BRAND['website']})")
-print(f"   Spreadsheet        : {SPREADSHEET_NAME}")
+print(f"   Run ID             : {os.getenv('RUN_ID')}")
 print(f"   Model              : {GEMINI_MODEL}")
 print(f"   Countries          : {len(COUNTRY_MAP)} | Personas: {len(COUNTRY_PERSONAS)}")
 print(f"   Specialties        : {len(SPECIALTY_PATTERNS)}")

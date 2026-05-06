@@ -1,26 +1,45 @@
+# ─────────────────────────────────────────────────────────────
+# COMPETITOR CONTEXT PIPELINE
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Extracts structured competitor intelligence from selected URLs.
+#
+# INPUT:
+#   - selected_urls (Postgres via get_selected_urls)
+#   - run_keywords (for primary keyword detection)
+#
+# PROCESS:
+#   - Scrapes page content (Firecrawl → Trafilatura → BS4 fallback)
+#   - Cleans text and extracts headers (H1/H2/H3)
+#   - Extracts FAQs + structured "others" data using Gemini
+#   - Extracts meta title using multiple fallback strategies
+#   - Extracts structured keyword clusters (7 categories)
+#
+# OUTPUT:
+#   - competitor_pages table (content + metadata)
+#   - competitor_keywords table (clustered keywords)
+#   - raw + clean text stored in R2
+#
+# NOTES:
+#   - Uses multi-layer scraping fallback for robustness
+#   - Gemini used for structured extraction (FAQs + keywords)
+#   - High-complexity cell — avoid casual logic changes
+# ─────────────────────────────────────────────────────────────
+
+
 # ─────────────────────────────────────────────
 # IMPORTS
 # ─────────────────────────────────────────────
 
 import json
-import time
-import re
 import os
+import re
+import time
 
 import requests as req_lib
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
-
-from config import (
-    GEMINI_API_KEY,
-    GEMINI_MODEL,
-    FIRECRAWL_API_KEY,
-    MAX_CELL,
-    MAX_SCRAPE_CHARS,
-    SAFETY_OFF,
-    detect_specialty,
-)
 
 from app.repositories.run_repo import get_run_keywords
 from app.repositories.search_repo import (
@@ -34,10 +53,18 @@ from app.storage import (
     scrape_clean_key,
 )
 
+from config import (
+    FIRECRAWL_API_KEY,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    MAX_CELL,
+    MAX_SCRAPE_CHARS,
+    SAFETY_OFF,
+    detect_specialty,
+)
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
+
+# ── Extraction limits ─────────────────────────────────────────
 
 MAX_TEXT_CHARS = 30_000
 
@@ -892,8 +919,8 @@ def count_keywords(extracted: dict) -> tuple:
     cost_pct       = (cost_count / total * 100) if total else 0
     return total, cost_count, cost_pct
 
-def format_for_sheet(extracted: dict) -> str:
-    """Human-readable summary of the JSON for the Keyword_data sheet display."""
+def format_keyword_summary(extracted: dict) -> str:
+    """Human-readable summary of extracted keyword clusters."""
     lines = []
     for cat in ["procedure_types", "patient_concerns", "safety_quality",
                 "recovery_results", "travel_logistics", "cost_value",
@@ -1017,7 +1044,7 @@ def main(run_id: int):
             print("  🔑 Extracting keywords...")
             extracted_keywords = extract_keywords(url, clean_text, primary_keyword)
             keyword_count, cost_count, cost_pct = count_keywords(extracted_keywords)
-            keyword_summary = format_for_sheet(extracted_keywords)
+            keyword_summary = format_keyword_summary(extracted_keywords)
 
             print(
                 f"  🔢 {keyword_count} keywords extracted | "

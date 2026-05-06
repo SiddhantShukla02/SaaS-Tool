@@ -1,13 +1,33 @@
-# ─── shared_utils.py ─────────────────────────────────────────────────
-# Shared functions for ALL downstream cells (17, 19, 21, 23).
-# Solves: Gemini markdown-decorated output breaking regex parsers.
-# Import this at the top of each cell that parses Gemini output.
-# ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# SHARED UTILS (GEMINI OUTPUT PARSING)
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Provides reusable parsing and cleaning utilities for handling
+#   inconsistent Gemini outputs across pipeline stages.
+#
+# INPUT:
+#   - Raw Gemini responses (text / JSON / markdown-like output)
+#
+# PROCESS:
+#   - Cleans markdown artifacts (bold, headers, code blocks)
+#   - Parses structured sections (H1/meta, outline, FAQs)
+#   - Extracts headings, questions, and hooks
+#   - Provides fallback-safe parsing logic
+#
+# OUTPUT:
+#   - Structured Python dictionaries / lists
+#   - Cleaned text ready for downstream processing
+#
+# NOTES:
+#   - Designed to handle inconsistent Gemini formatting
+#   - Used across Stage 3 and later pipeline steps
+#   - No external dependencies (pure utility layer)
+# ─────────────────────────────────────────────────────────────
 
 import re
 
 # ═══════════════════════════════════════════════════════════════
-# FIX 1: Clean Gemini output before parsing
+# Clean Gemini output before parsing
 # ═══════════════════════════════════════════════════════════════
 
 def clean_gemini_output(text):
@@ -47,7 +67,7 @@ def clean_gemini_output(text):
 
 
 # ═══════════════════════════════════════════════════════════════
-# FIX 2: Flexible section splitter for H1/Meta output
+# Flexible section splitter for H1/Meta output
 # ═══════════════════════════════════════════════════════════════
 
 def parse_h1_meta_sections(raw_text):
@@ -112,7 +132,7 @@ def extract_best_h1(h1_options_text, recommended_text, fallback_keyword):
 
 
 # ═══════════════════════════════════════════════════════════════
-# FIX 3: Flexible outline parser
+# Flexible outline parser
 # ═══════════════════════════════════════════════════════════════
 
 def parse_outline_sections(raw_text):
@@ -307,7 +327,7 @@ def extract_empathy_hook(hooks_text, section_type):
 
 
 # ═══════════════════════════════════════════════════════════════
-# FIX 5: Reddit relevance filter
+# Reddit relevance filter
 # ═══════════════════════════════════════════════════════════════
 
 # ── Relevance filter — strengthened: 3 keywords + must contain 1 medical term ─
@@ -350,4 +370,3 @@ def is_relevant_post(post, topic_keywords=None):
         check_words = check_words | set(w.lower() for w in topic_keywords)
     return sum(1 for kw in check_words if kw in text) >= 3
     
-# print("✅ shared_utils.py loaded — all parser functions available")

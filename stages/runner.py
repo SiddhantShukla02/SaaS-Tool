@@ -1,12 +1,12 @@
 """
-stages/runner.py — Executes extracted pipeline cells as functions.
+stages/runner.py — Executes pipeline stage cell files in order.
 
-Each "stage" is one or more of your original Jupyter cells, now saved as .py
-files in stages/cells/. The runner executes them via exec() in a clean
-namespace that includes your config.
+Each stage is defined as an ordered list of .py files under stages/cells/.
+The runner executes each file via exec() in a fresh namespace, captures stdout,
+streams recent output lines to the UI activity log, and records stage status.
 
-This is the "don't change your code" guarantee in action — the original cell
-source is copied verbatim; only the execution context changes.
+RUN_ID and SAAS_RUN_ID are exposed as environment variables so migrated cells
+can read/write run-scoped data from Postgres and R2.
 """
 
 import os
@@ -114,9 +114,8 @@ def run_stage(stage_name: str, run_id: int,
     Run a full stage (sequence of cells) for a given run.
     Returns {'status': 'success'/'failed', 'output': str, 'error': str|None}.
 
-    The run_id is made available to cells via the SAAS_RUN_ID env var,
-    which cells can optionally read (current cells don't need it since the
-    Google Sheet is the shared state).
+    The run_id is made available to cells via SAAS_RUN_ID and RUN_ID env vars.
+    Migrated cells use RUN_ID for run-scoped Postgres/R2 reads and writes.
     """
     if stage_name not in STAGE_CELLS:
         return {
@@ -136,10 +135,10 @@ def run_stage(stage_name: str, run_id: int,
             if db.is_cancelled(run_id):
                 if progress_cb:
                     progress_cb("🛑 Run cancelled. Stopping before next cell.")
-                return{
+                return {
                     "status": "cancelled",
                     "output": "\n\n".join(outputs)[-2000:],
-                    "error" : None,
+                    "error": None,
                     "duration": time.time() - started,
                 }
 

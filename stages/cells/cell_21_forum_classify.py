@@ -1,46 +1,55 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# FORUM INSIGHT CLASSIFIER (GEMINI)
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Classifies forum insights into structured categories and
+#   generates priority-ranked, prompt-ready outputs.
+#
+# INPUT:
+#   - forum_master_raw table (Postgres)
+#
+# PROCESS:
+#   - Batch classify insights using Gemini
+#   - Assign:
+#       → insight_type (9 categories)
+#       → journey_stage (TOFU/MOFU/BOFU)
+#       → clean_insight (pull-quote)
+#   - Compute priority scores based on:
+#       → source authority
+#       → emotion intensity
+#       → upvotes
+#       → journey stage
+#   - Build markdown blocks grouped by category
+#
+# OUTPUT:
+#   - forum_master_insights (Postgres)
+#   - forum_master_md (R2 + DB pointers)
+#
+# NOTES:
+#   - Uses batching for Gemini calls
+#   - Includes fallback classification logic
+#   - High-impact stage for SEO content quality
+# ─────────────────────────────────────────────────────────────
 
-# ─── CELL B: Gemini Insight Extractor + Master Insights Builder ─────
-# Reads  : Keyword_n8n > Forum_Master_Raw
-# Writes : Keyword_n8n > Forum_Master_Insights  (11 cols, 9-category classification)
-#         : Keyword_n8n > Forum_Master_MD        (prompt-ready markdown per category)
-#
-# 9 insight categories:
-#   Emotional_Hook | Patient_Question | Objection       | Trust_Signal
-#   Patient_Voice  | Country_Pain_Point | Negative_Signal | Content_Gap
-#   Journey_Stage_Signal
-#
-# Priority_Score 1-10 = source authority + emotion intensity + upvotes + journey stage
-#
-# Forum_Master_MD has one row per category + an ALL_CATEGORIES row which is a
-# drop-in replacement for Reddit_Insights_MD in Cells 21, 23, 25, and 31.
-# ─────────────────────────────────────────────────────────────────────
-import os
-from app.database import fetch_all
 import json
 import math
+import os
 import re
 import time
 from collections import Counter, defaultdict
+
 from google import genai
 from google.genai import types
 
-from app.storage import r2_put_text
+from app.database import fetch_all
 from app.repositories.search_repo import (
     insert_forum_master_insight,
     insert_forum_master_md,
 )
+from app.storage import r2_put_text
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
 
-# ── Config ────────────────────────────────────────────────────────────
+# ── Model + classification settings ───────────────────────────
 
 GEMINI_MODEL   = "gemini-2.5-flash"
 
@@ -73,7 +82,7 @@ SAFETY_OFF = [
     types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY",   threshold="OFF"),
 ]
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
@@ -267,10 +276,13 @@ def build_master_md(classified_rows: list) -> dict:
 # ── MAIN ──────────────────────────────────────────────────────────────
 def main():
     print("\n" + "="*60)
-    print("🤖 CELL B — GEMINI INSIGHT EXTRACTOR")
+    print("🤖 FORUM INSIGHT CLASSIFIER")
     print("="*60)
 
-    run_id = int(os.environ.get("RUN_ID"))
+    run_id_raw = os.environ.get("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    run_id = int(run_id_raw)
 
     records = fetch_all(
         "SELECT * FROM forum_master_raw WHERE run_id = %s",
@@ -380,7 +392,7 @@ def main():
 
     # Summary
     print("\n" + "="*60)
-    print("✅ CELL B COMPLETE")
+    print("✅ FORUM CLASSIFICATION COMPLETE")
     print("="*60)
     type_counts  = Counter(r["Insight_Type"]  for r in classified_rows)
     stage_counts = Counter(r["Journey_Stage"] for r in classified_rows)

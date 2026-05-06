@@ -1,26 +1,42 @@
-# ─── CELL A: Question Bank Builder (NEW — Repurposing Pipeline stage 1) ─
-#
+# ─────────────────────────────────────────────────────────────
+# QUESTION BANK BUILDER
+# ─────────────────────────────────────────────────────────────
 # PURPOSE:
-#   Read every question-shaped asset the pipeline has already collected
-#   (PAA, autocomplete, related searches, forum insights, competitor FAQs)
-#   and consolidate into one deduplicated, intent-tagged, priority-scored
-#   sheet: Question_Bank.
+#   Consolidates all question-type signals (PAA, autocomplete,
+#   related searches, forum insights, competitor FAQs) into a
+#   deduplicated, intent-tagged, priority-scored dataset.
 #
-# This is raw material for Cell B, which generates Quora/Reddit/Substack
-# drafts. Nothing is published here — just data consolidation.
+# INPUT:
+#   - paa_questions
+#   - search_suggestions (autocomplete + related)
+#   - forum_master_insights
+#   - competitor_pages (FAQs)
+#   - run_keywords (country + keyword context)
 #
-# Reads  : Keyword_n8n >
-#            PAA, Other_Autocomplete, Related_search,
-#            Forum_Master_Insights, Url_data_ext (FAQs column),
-#            keyword (for country codes + primary keyword)
-# Writes : Keyword_n8n > Question_Bank
-# ─────────────────────────────────────────────────────────────────────
-
+# PROCESS:
+#   - Normalizes fragments into questions
+#   - Removes spam via regex filters
+#   - Deduplicates via Jaccard similarity
+#   - Classifies intent + funnel stage
+#   - Detects country context
+#   - Computes priority score
+#
+# OUTPUT:
+#   - Question bank → R2 (outputs/{run_id}/question_bank.json)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Stage 5 (repurposing pipeline)
+#   - Feeds platform draft generator (cell_37)
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
 import json
 import os
 import re
 from datetime import datetime
+from collections import Counter
+
 from psycopg2.extras import Json
 
 from app.database import fetch_all, execute
@@ -29,7 +45,7 @@ from app.repositories.run_repo import get_run_keywords
 
 # Import from the two config files
 from config import (
-     MAX_CELL,
+     MAX_CELL, GEMINI_API_KEY,
     COUNTRY_MAP, get_country_name, detect_specialty,
 )
 from config_repurpose import (
@@ -37,7 +53,7 @@ from config_repurpose import (
 )
 
 
-# ── Sheet helpers (reused pattern from v16 cells) ────────────────────
+# ── Helpers  ────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
@@ -449,11 +465,14 @@ def priority_score(q: dict) -> float:
 # ═══════════════════════════════════════════════════════════════════
 
 print("\n" + "═" * 65)
-print("  QUESTION BANK BUILDER")
+print("  🧠 QUESTION BANK BUILDER")
 print("  Consolidates PAA + autocomplete + related + forum + comp-FAQ")
 print("═" * 65)
 
-run_id = int(os.getenv("RUN_ID"))
+run_id_raw = os.getenv("RUN_ID")
+if not run_id_raw:
+    raise RuntimeError("RUN_ID env var is required")
+run_id = int(run_id_raw)
 
 # Load context
 kw_rows = get_run_keywords(run_id)
@@ -593,7 +612,6 @@ print(f"\n  💾 Question bank saved → {question_bank_r2_key}")
 # Summary by source
 print(f"\n  ✅ Question Bank built: {len(deduped)} unique questions")
 print(f"\n  Breakdown by source:")
-from collections import Counter
 source_counts = Counter(q["source"] for q in deduped)
 for source, count in source_counts.most_common():
     print(f"    {source:<20}: {count}")
@@ -608,5 +626,5 @@ for q in deduped[:5]:
     print(f"    [{q['priority']}] {q['question'][:80]}")
 
 print("\n" + "═" * 65)
-print(f"  NEXT: Run Cell B (Platform Draft Generator)")
+print("  NEXT: Platform draft generator stage")
 print("═" * 65)

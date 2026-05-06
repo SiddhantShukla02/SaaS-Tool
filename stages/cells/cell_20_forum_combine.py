@@ -1,31 +1,38 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
-
-# ─── CELL A: Forum Combiner + Deduplicator ──────────────────────────
-# Reads  : Keyword_n8n > Reddit_Insights tab
-#         : Keyword_n8n > Reddit_Insights_MD tab
-#         : Keyword_n8n > Google_Forum_Insights tab
-# Writes : Keyword_n8n > Forum_Master_Raw tab
+# ─────────────────────────────────────────────────────────────
+# FORUM COMBINER + DEDUPLICATOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Combines Reddit, Reddit markdown, and Brave forum search results
+#   into one deduplicated forum insight dataset.
 #
-# Schema : Source | Detected_Country | Insight_Text | Emotion_Tags |
-#          Upvotes | URL | Raw_Title
+# INPUT:
+#   - reddit_insights table
+#   - reddit_insights_md table + R2 markdown files
+#   - forum_search_results table
 #
-# Deduplication : Jaccard token-overlap >= DEDUP_THRESHOLD collapses to richer row
-# Country detection : longest-match keyword scan against 40+ target market signals
-# ─────────────────────────────────────────────────────────────────────
+# PROCESS:
+#   - Loads all forum sources for the current run
+#   - Detects likely country signals
+#   - Infers emotion tags where missing
+#   - Deduplicates near-identical insights using Jaccard overlap
+#   - Keeps the richer row when duplicates are found
+#
+# OUTPUT:
+#   - forum_master_raw rows in Postgres
+#
+# NOTES:
+#   - Uses DEDUP_THRESHOLD for near-duplicate control
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-import re
-import time
 import math
+import os
+import re
 from collections import Counter
+
+from app.database import fetch_all
+from app.repositories.search_repo import insert_forum_master_row
+from app.storage import r2_get_text
 
 # ── Config ────────────────────────────────────────────────────────────
 
@@ -82,7 +89,7 @@ EMOTION_KEYWORDS = {
 }
 
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
@@ -150,10 +157,10 @@ def deduplicate(rows: list) -> list:
 
 # ── LOAD FROM DB  ──────────────────────────────────────────────────────────────
 
-from app.database import fetch_all
-import os
-
-run_id = int(os.environ.get("RUN_ID"))
+run_id_raw = os.environ.get("RUN_ID")
+if not run_id_raw:
+    raise RuntimeError("RUN_ID env var is required")
+run_id = int(run_id_raw)
 
 def load_reddit_insights():
     rows = fetch_all(
@@ -179,8 +186,6 @@ def load_reddit_md():
         "SELECT * FROM reddit_insights_md WHERE run_id = %s",
         (run_id,),
     )
-
-    from app.storage import r2_get_text
 
     result = []
     for r in rows:
@@ -221,7 +226,7 @@ def load_brave_insights():
 # ── MAIN ──────────────────────────────────────────────────────────────
 def main():
     print("\n" + "="*60)
-    print("🔗 CELL A — FORUM COMBINER + DEDUPLICATOR")
+    print("🔗 FORUM COMBINER + DEDUPLICATOR")
     print("="*60)
 
     print("\n📥 Loading all three forum sources...")
@@ -236,14 +241,13 @@ def main():
     print(f"   Brave/Forum       : {len(brave_rows)}")
 
     if not all_rows:
-        print("❌ No rows loaded. Ensure Cells 15 and 17 have run.")
+        print("❌ No rows loaded. Ensure Reddit and Brave forum stages have run.")
         return
 
     deduped = deduplicate(all_rows)
     removed = len(all_rows) - len(deduped)
     print(f"\n✂️  After dedup: {len(deduped)} rows ({removed} duplicates removed)")
 
-    from app.repositories.search_repo import insert_forum_master_row
 
     print("\n💾 Saving forum master rows to DB...")
 
@@ -260,7 +264,7 @@ def main():
         )
 
     print(f"\n{'='*60}")
-    print("✅ CELL A COMPLETE — Forum_Master_Raw written")
+    print("✅ FORUM COMBINE COMPLETE — forum_master_raw written")
     print(f"{'='*60}")
     print(f"  Rows   : {len(deduped)}")
     src_counts = Counter(r["Source"] for r in deduped)
@@ -270,6 +274,6 @@ def main():
     print(f"\n  Top countries:")
     for country, cnt in country_counts.most_common(8):
         print(f"  {country:<12s}: {cnt}")
-    print("\n→ Run Cell B next to classify all rows into 9 insight categories")
+    print("\n→ Next: classify forum rows into insight categories")
 
 main()

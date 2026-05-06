@@ -1,8 +1,24 @@
-# ─── STAGE 5 WRAPPER (POST-MIGRATION) ───
-# Simply executes Cell B (platform drafts generator)
-# which now handles R2 + DB internally.
+# ─────────────────────────────────────────────────────────────
+# STAGE 5 WRAPPER
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Executes the Stage 5 platform draft generator.
+#
+# INPUT:
+#   - RUN_ID env var
+#   - cell_37_platform_drafts.py
+#
+# PROCESS:
+#   - Dynamically loads and executes cell_37
+#
+# OUTPUT:
+#   - Delegated to cell_37
+#
+# NOTES:
+#   - Temporary wrapper
+#   - Future refactor: integrate Stage 5 directly into STAGE_CELLS
+# ─────────────────────────────────────────────────────────────
 
-import os
 import importlib.util
 from pathlib import Path
 

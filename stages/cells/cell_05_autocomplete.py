@@ -1,19 +1,42 @@
-# """
-# Google Autocomplete Fetcher
-# ============================
-# Reads: Keyword_n8n → "keyword" tab (columns: Keyword, Country_Code)
-# Writes: Keyword_n8n → "Other_PAA" tab
-# """
-from app.repositories.search_repo import save_autocomplete_suggestions
+# ─────────────────────────────────────────────────────────────
+# GOOGLE AUTOCOMPLETE FETCHER
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Fetches Google Autocomplete suggestions for each keyword
+#   across multiple intent modifiers (how, cost, best, etc.)
+#
+# INPUT:
+#   - run_keywords (from Postgres via get_run_keywords)
+#     → keyword, country_code
+#
+# PROCESS:
+#   - For each keyword × country:
+#       → apply intent modifiers
+#       → call Google Suggest API
+#       → collect suggestions
+#       → deduplicate globally
+#
+# OUTPUT:
+#   - Stored in DB via save_autocomplete_suggestions
+#   - Used later in:
+#       → question bank (Stage 4)
+#       → content generation (Stage 3)
+#
+# NOTES:
+#   - Rate limited using REQUEST_DELAY
+#   - No Google Sheets dependency (fully migrated)
+# ─────────────────────────────────────────────────────────────
+
+import os
 import time
 import urllib.parse
-import requests
-import os
-from app.repositories.run_repo import get_run_keywords
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
 
+import requests
+
+from app.repositories.run_repo import get_run_keywords
+from app.repositories.search_repo import save_autocomplete_suggestions
+
+# ── Autocomplete settings ─────────────────────────────────────
 INTENT_MODIFIERS = [
     "",          # Base keyword
     " how",      # Informational
@@ -76,7 +99,7 @@ def main():
     ]
 
     if not keyword_pairs:
-        raise ValueError("❌ No valid keyword/country pairs found — check the 'keyword' tab.")
+        raise ValueError("❌ No valid keyword/country pairs found for this run.")
 
     total_calls = len(keyword_pairs) * len(INTENT_MODIFIERS)
     print(f"\n🔎 Starting autocomplete fetch")
@@ -111,24 +134,6 @@ def main():
 
     print(f"\n   Total unique suggestions collected: {len(unique_set)}")
     save_autocomplete_suggestions(run_id, all_rows)
-
-    # 4. Build output rows
-    output_rows = [[
-        "Keyword",
-        "Country_Code",
-        "Modifier",
-        "Suggestions",
-        "Suggestion_Count",
-    ]]
-
-    for (kw, country, modifier), suggestions in all_rows.items():
-        output_rows.append([
-            kw,
-            country,
-            modifier,
-            " | ".join(suggestions),
-            len(suggestions),
-        ])
 
     print("\nSample suggestions:")
     for k, v in list(all_rows.items())[:2]:

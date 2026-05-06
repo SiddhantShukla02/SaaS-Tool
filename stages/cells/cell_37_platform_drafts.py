@@ -1,55 +1,67 @@
-# ─── CELL B: Platform Draft Generator (NEW — Repurposing Pipeline stage 2) ─
-#
+# ─────────────────────────────────────────────────────────────
+# PLATFORM DRAFT GENERATOR
+# ─────────────────────────────────────────────────────────────
 # PURPOSE:
-#   Reads Question_Bank and generates platform-appropriate drafts for:
-#     - Quora (800-word authoritative answers)
-#     - Reddit (400-word empathetic, non-promotional posts)
-#     - Substack (2,000-word themed essays clustering 5-8 questions)
+#   Generates platform-specific repurposing drafts for Quora,
+#   Reddit, and Substack from the question bank.
 #
-# Uses the existing pipeline's answer-hooks where available:
-#   - Competitor_Answer_Ref from Url_data_ext → seeds Quora draft
-#   - Forum_Master_MD voice quotes → seeds Reddit draft
-#   - Blog_Output existing blog content → reference context
+# INPUT:
+#   - question_bank output (R2 + Postgres)
+#   - forum_master_md ALL_CATEGORIES
+#   - final blog output
 #
-# Reads  : Keyword_n8n > Question_Bank, Forum_Master_MD, Url_data_ext,
-#                        Blog_Output (if exists, for cross-reference context)
-# Writes : Keyword_n8n > Quora_Drafts, Reddit_Drafts, Substack_Drafts
-# ─────────────────────────────────────────────────────────────────────
+# PROCESS:
+#   - Loads prioritized questions from R2
+#   - Builds platform-specific prompts
+#   - Generates Quora answers, Reddit replies, and Substack essays
+#   - Applies platform policy rules and YMYL safeguards
+#
+# OUTPUT:
+#   - Quora drafts → R2 (outputs/{run_id}/quora_drafts.json)
+#   - Reddit drafts → R2 (outputs/{run_id}/reddit_drafts.json)
+#   - Substack drafts → R2 (outputs/{run_id}/substack_drafts.json)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Stage 5 repurposing output
+#   - Drafts are review-only; nothing is auto-published
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-from stages.cells.cell_23_shared_utils import *
-
+import json
+import os
 import re
 import time
-import json
-from datetime import datetime
 from collections import defaultdict
-import os
+from datetime import datetime
+
 from psycopg2.extras import Json
+from google import genai
+from google.genai import types
 
 from app.database import fetch_one, execute
 from app.storage import r2_get_text, r2_put_text
-
-from google import genai
-from google.genai import types
 
 from config import (
     GEMINI_API_KEY, GEMINI_MODEL,
     MAX_CELL, MAX_TOKENS, SAFETY_OFF,
     BRAND, CITATION_ALLOWLIST, all_allowed_citations,
-    COUNTRY_PERSONAS, get_persona, get_country_name,
-    YMYL_DISCLAIMERS, FORBIDDEN_MEDICAL_CLAIMS,
+    get_persona, get_country_name,
+    FORBIDDEN_MEDICAL_CLAIMS,
     TEMP_FAQ_ANSWER, TEMP_BLOG_SECTION,
 )
 from config_repurpose import (
     PLATFORM_SPECS, SUBREDDIT_ALLOWLIST,
-    QUORA_POLICY, REDDIT_POLICY, SUBSTACK_SETTINGS,
+    QUORA_POLICY, REDDIT_POLICY,
 )
+
+from stages.cells.cell_23_shared_utils import *
 
 # ── Auth ─────────────────────────────────────────────────────────────
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-# ── Sheet helpers ────────────────────────────────────────────────────
+# ── Helpers (output truncation for storage safety) ────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
@@ -101,7 +113,7 @@ def load_question_bank(run_id: int):
     )
 
     if not row:
-        print("  ❌ Question bank output not found. Run Cell A first.")
+        print("  ❌ Question bank output not found. Run question bank builder first.")
         return []
 
     payload = json.loads(r2_get_text(row["r2_key"]) or "{}")
@@ -631,21 +643,25 @@ def generate_substack_drafts(bank: list, blog_ref: str,
 
 print("\n" + "═" * 65)
 print("  PLATFORM DRAFT GENERATOR")
-print("  Generates Quora + Reddit + Substack drafts from Question_Bank")
+print("  Generates Quora + Reddit + Substack drafts from question bank")
 print("═" * 65)
 
-run_id = int(os.getenv("RUN_ID"))
+run_id_raw = os.getenv("RUN_ID")
+if not run_id_raw:
+    raise RuntimeError("RUN_ID env var is required")
+run_id = int(run_id_raw)
 
 # Load question bank
-print("\n  Loading Question_Bank...")
+print("\n  Loading question bank...")
 bank = load_question_bank(run_id)
 if not bank:
-    print("❌ Question_Bank is empty. Run Cell A (Question Bank Builder) first.")
+    print("❌ Question bank is empty. Run question bank builder first.")
 else:
-    print(f"  ✅ Loaded {len(bank)} questions from Question_Bank")
+    print(f"  ✅ Loaded {len(bank)} questions from question bank")
 
     # Get specialty from first row
-    specialty = bank[0].get("Specialty", "general") if bank else "general"
+    specialty = bank[0].get("Specialty") if bank else None
+    specialty = specialty if isinstance(specialty, str) and specialty.strip() else "general"
 
     # Load supporting context
     print("\n  Loading supporting context...")

@@ -1,34 +1,50 @@
 """
 ═════════════════════════════════════════════════════════════════════
-  config.py — Divinheal Content Pipeline Configuration
+  config.py — Divinheal SaaS Content Pipeline Configuration
 ═════════════════════════════════════════════════════════════════════
 
-  EVERYTHING your pipeline needs — keys, sheet names, model settings,
-  country personas, specialty examples, source allowlists, partner
-  hospitals, internal links — lives here. No other file should contain
-  project-specific values.
+  Central configuration for the Divinheal content pipeline.
+
+  This file contains:
+    - API key loading
+    - Gemini model settings
+    - content generation limits
+    - Divinheal brand settings
+    - partner hospitals
+    - internal link inventory
+    - citation allowlist
+    - country/persona mappings
+    - specialty detection
+    - scraping/search behaviour
+    - YMYL guardrails
+    - AI-style phrase filters
+
+  Storage architecture:
+    - Structured state lives in Postgres
+    - Large text / JSON outputs live in R2
+    - Google Sheets / Docs are not part of the migrated pipeline
 
   HOW TO USE:
-    1. Fill in every block marked with  # ⚠️ FILL IN
-    2. Blocks marked  # ✏️ OPTIONAL  can stay as-is if defaults work
-    3. Blocks marked  # 🔒 DO NOT EDIT  are technical constants
-    4. Save this file as `config.py` next to your notebook
-    5. Run:  python config.py    (self-test — confirms everything loads)
+    1. Set required API keys in environment variables.
+    2. Fill in brand, hospital, citation, persona, and internal-link sections.
+    3. Run: python config.py
+       This self-test confirms required config is available.
 
   SECURITY:
     API keys load from environment variables only.
-    NEVER paste keys directly into this file — use .env instead:
-       SERP_API_KEY=xxxxx
-       GEMINI_API_KEY=xxxxx
-       FIRECRAWL_API_KEY=xxxxx
-       BRAVE_API_KEY=xxxxx
-    Then:  pip install python-dotenv
-    And at notebook start:  from dotenv import load_dotenv; load_dotenv()
+    NEVER paste keys directly into this file.
+
+    Required:
+      SERP_API_KEY
+      GEMINI_API_KEY
+      FIRECRAWL_API_KEY
+      BRAVE_API_KEY
 
 ═════════════════════════════════════════════════════════════════════
 """
 
 import os
+import re
 from google.genai import types  # type: ignore
 
 
@@ -54,69 +70,13 @@ BRAVE_API_KEY     = _require_env("BRAVE_API_KEY")
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 2 — GOOGLE SHEETS + DRIVE + DOCS
-# ═════════════════════════════════════════════════════════════════════
-# ⚠️ FILL IN if yours differs
-
-SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME_GLOBAL") # Name of main google sheet
-DOC_OUTPUT_TITLE = os.environ.get("FINAL_DOC_NAME") # Name of main google doc
-
-
-
-# 🔒 DO NOT EDIT
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents",
-]
-
-
-# ═════════════════════════════════════════════════════════════════════
-# SECTION 3 — SHEET TAB NAMES  (one per pipeline stage)
-# ═════════════════════════════════════════════════════════════════════
-# ✏️ OPTIONAL — change only if you've renamed tabs in your sheet
-
-TABS = {
-    # Inputs (you populate these)
-    "keyword":               "keyword",                # Keyword + Country_Code rows
-    "final_url":             "Final_Url",              # Curated competitor URLs
-
-    # SERP harvesting outputs
-    "serp_url":              "Serp_Url",
-    "paa":                   "PAA",
-    "autocomplete":          "Other_Autocomplete",
-    "related_search":        "Related_search",
-
-    # Competitor scraping outputs
-    "url_data":              "Url_data_ext",
-    "keyword_data":          "Keyword_data",
-
-    # Forum intelligence outputs
-    "reddit_insights":       "Reddit_Insights",
-    "reddit_insights_md":    "Reddit_Insights_MD",
-    "google_forum_insights": "Google_Forum_Insights",
-    "forum_master_raw":      "Forum_Master_Raw",
-    "forum_master_insights": "Forum_Master_Insights",
-    "forum_master_md":       "Forum_Master_MD",
-
-    # Blog generation outputs
-    "h1_meta_output":        "H1_Meta_Output",
-    "blog_outline":          "Blog_Outline",
-    "empathy_faq_output":    "Empathy_FAQ_Output",
-    "blog_output":           "Blog_Output",
-    "speakable_candidates":  "Speakable_Candidates",
-    "citation_list":         "Citation_List",
-}
-
-
-# ═════════════════════════════════════════════════════════════════════
-# SECTION 4 — GEMINI MODEL + LIMITS
+# SECTION 2 — GEMINI MODEL + LIMITS
 # ═════════════════════════════════════════════════════════════════════
 # ✏️ OPTIONAL — raise limits if you hit truncation, lower for cost
 
 GEMINI_MODEL     = "gemini-2.5-flash"   # Default model for all calls
 
-MAX_CELL         = 49_000   # Google Sheets cell character limit buffer
+MAX_CELL         = 49_000   # Output text truncation safety limit
 MAX_SCRAPE_CHARS = 45_000   # Max chars per scraped page sent to Gemini
 MAX_TOKENS       = 20_000    # Default Gemini output tokens
 OUTLINE_TOKENS   = 25_000   # Outline cell needs more (thinking mode overhead)
@@ -130,7 +90,7 @@ TEMP_H1_META          = 0.7   # Headlines need some creativity
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 5 — BLOG GENERATION TARGETS
+# SECTION 3 — BLOG GENERATION TARGETS
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN based on your editorial standards
 
@@ -143,28 +103,28 @@ MAX_SENTENCE_WORDS       = 30       # Hard ceiling (soft target: 18)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 6 — DIVINHEAL BRAND + BUSINESS
+# SECTION 4 — DIVINHEAL BRAND + BUSINESS
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN — these show up throughout generated content
 
 BRAND = {
     "name":            "Divinheal",
     "website":         "https://www.divinheal.com/",
-    "contact_email":   "care@divinheal.com",                                # e.g. "care@divinheal.com"
-    "contact_phone":   "+91 9327923184",                                # e.g. "+91-XXXX-XXXXXX"
-    "whatsapp":        "+91 9327923184",                                # e.g. "+91-XXXX-XXXXXX"
+    "contact_email":   "care@divinheal.com",                            
+    "contact_phone":   "+91 9327923184",                                
+    "whatsapp":        "+91 9327923184",                                
     "tagline":         "Medical tourism to India, simplified",
-    "founded_year":    "2020",                                # e.g. "2023"
+    "founded_year":    "2020",                                
     "jci_partnership": True,
     "nabh_partnership": True,
     "default_cta":     "Get a free consultation with Divinheal",
-    "spelling":        "british",                         # "british" | "american"
+    "spelling":        "british",                         
     "oxford_comma":    True,
 }
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 7 — PARTNER HOSPITALS  (used for entity-explicit naming)
+# SECTION 5 — PARTNER HOSPITALS  (used for entity-explicit naming)
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN — the writer uses these instead of saying "our partner hospital"
 # Leave empty dict {} if you want the model to infer from competitor content
@@ -204,6 +164,10 @@ PARTNER_HOSPITALS = {
         ("Artemis Hospital", "Gurugram"),
         ("Lokmanya Hospitals", "Pune"),
         ("Apollo Hospitals, Indore", "Indore"),
+        ("Apollo Hospitals", "Hyderabad"),
+        ("Apollo Hospitals", "Delhi"),
+        ("Paras", "Delhi"),
+        ("Shelby International", "Delhi"),
         ("Max Hospital, Gurgaon", "Gurgaon"),
         ("Sri Ramachandra Medical Centre (SRMC)", "Chennai"),
         ("SP Medifort Hospital Trivandrum", "Trivandrum"),
@@ -496,7 +460,7 @@ def get_partner_hospitals(specialty: str, limit: int = 3) -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 8 — INTERNAL LINK INVENTORY
+# SECTION 6 — INTERNAL LINK INVENTORY
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN — used for internal linking suggestions in blog outputs
 # Key = slug on divinheal.com, value = short description for relevance matching
@@ -529,7 +493,7 @@ def get_internal_link_suggestions(topic_words: list, limit: int = 5) -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 9 — CITATION ALLOWLIST  (critical for YMYL compliance)
+# SECTION 7 — CITATION ALLOWLIST  (critical for YMYL compliance)
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN — ONLY these sources may be cited by name in generated blogs.
 # Anything outside this list gets rewritten to "multiple published studies"
@@ -813,7 +777,7 @@ def all_allowed_citations(specialty: str | None = None) -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 10 — COUNTRY MAP  (ISO alpha-2 → display name)
+# SECTION 8 — COUNTRY MAP  (ISO alpha-2 → display name)
 # ═════════════════════════════════════════════════════════════════════
 # ✏️ OPTIONAL — add countries as you expand to new markets
 
@@ -836,7 +800,7 @@ def get_country_name(code: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 11 — COUNTRY PERSONAS  (drives locale-specific blog framing)
+# SECTION 9 — COUNTRY PERSONAS  (drives locale-specific blog framing)
 # ═════════════════════════════════════════════════════════════════════
 # ✏️ OPTIONAL — edit concerns/trust_signals based on real customer research
 # Each persona shows up in the section writer prompt for that country
@@ -976,10 +940,10 @@ def get_persona(code: str) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 12 — MEDICAL SPECIALTY DETECTION
+# SECTION 10 — MEDICAL SPECIALTY DETECTION
 # ═════════════════════════════════════════════════════════════════════
 # ✏️ OPTIONAL — add specialties if you're expanding into new verticals
-# Used by the keyword extractor to pick specialty-appropriate examples
+# Used to route prompts, partner hospitals, citations, and repurposing context.
 
 SPECIALTY_PATTERNS = {
 
@@ -1494,7 +1458,7 @@ def detect_specialty(keyword: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 13 — YMYL COMPLIANCE  (legal/medical safety guardrails)
+# SECTION 11 — YMYL COMPLIANCE  (legal/medical safety guardrails)
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN — review these with your legal/compliance team
 
@@ -1522,7 +1486,7 @@ FORBIDDEN_MEDICAL_CLAIMS = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 14 — SCRAPING + SERP BEHAVIOR
+# SECTION 12 — SCRAPING + SERP BEHAVIOR
 # ═════════════════════════════════════════════════════════════════════
 # ✏️ OPTIONAL — tune for your domain-scraping strategy
 
@@ -1571,7 +1535,7 @@ REDDIT_EXCLUDED_SUBREDDITS = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 15 — GEMINI SAFETY SETTINGS
+# SECTION 13 — GEMINI SAFETY SETTINGS
 # ═════════════════════════════════════════════════════════════════════
 # 🔒 DO NOT EDIT — medical content triggers false positives; safety off is required
 # (Medical discussions of surgery, anatomy, and outcomes trip default filters)
@@ -1586,7 +1550,7 @@ SAFETY_OFF = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 16 — AI-DETECTION PHRASES TO AVOID
+# SECTION 14 — AI-DETECTION PHRASES TO AVOID
 # ═════════════════════════════════════════════════════════════════════
 # ⚠️ FILL IN / ADJUST — update as new LLM tells emerge
 
@@ -1623,25 +1587,9 @@ AI_TELL_PHRASES = [
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SECTION 17 — SELF-TEST  (run `python config.py` to validate)
+# SECTION 15 — SELF-TEST  (run `python config.py` to validate)
 # ═════════════════════════════════════════════════════════════════════
 # 🔒 DO NOT EDIT
-
-import re  # needed for get_internal_link_suggestions()
-
-GOOGLE_CREDS_ENV_VARS = [
-    "type",
-    "project_id",
-    "private_key_id",
-    "private_key",
-    "client_email",
-    "client_id",
-    "auth_uri",
-    "token_uri",
-    "auth_provider_x509_cert_url",
-    "client_x509_cert_url",
-]
-
 
 
 def _count_citations():
@@ -1659,8 +1607,6 @@ def _validate():
     issues = []
     if not BRAND.get("name"):
         issues.append("BRAND.name is empty")
-    if not SPREADSHEET_NAME:
-        issues.append("SPREADSHEET_NAME is empty")
     partner_total = sum(len(v) for v in PARTNER_HOSPITALS.values())
     if partner_total == 0:
         issues.append("⚠️  No partner hospitals configured — writer will fall back to generic names")
@@ -1670,24 +1616,6 @@ def _validate():
     citation_total = _count_citations()
     if citation_total < 5:
         issues.append(f"⚠️  Only {citation_total} citations in allowlist — writer may be over-restricted")
-
-    missing_google_creds = [
-        name for name in GOOGLE_CREDS_ENV_VARS
-        if not os.environ.get(name, "").strip()
-    ]
-
-    if missing_google_creds:
-        issues.append(
-            "Missing Google service account env vars: "
-            + ", ".join(missing_google_creds)
-        )
-
-    private_key = os.environ.get("private_key", "")
-    if private_key and "\\n" not in private_key:
-        issues.append(
-            "Google private_key may be incorrectly formatted. "
-            "It should contain escaped \\n characters."
-        )
     
     return issues
 
@@ -1697,7 +1625,7 @@ if __name__ == "__main__":
     print("  config.py — self-test")
     print("═" * 60)
     print(f"  API keys           : all 4 loaded from env")
-    print(f"  Spreadsheet        : {SPREADSHEET_NAME}")
+    print(f"  Storage            : Postgres + R2")
     print(f"  Brand              : {BRAND['name']} ({BRAND['website']})")
     print(f"  Model              : {GEMINI_MODEL}")
     print(f"  Countries          : {len(COUNTRY_MAP)}")
@@ -1705,7 +1633,7 @@ if __name__ == "__main__":
     print(f"  Specialties        : {len(SPECIALTY_PATTERNS)}")
     print(f"  Partner hospitals  : {sum(len(v) for v in PARTNER_HOSPITALS.values())}")
     print(f"  Internal links     : {len(INTERNAL_LINKS)}")
-    print(f"  Citation allowlist : {sum(len(v) for v in CITATION_ALLOWLIST.values())}")
+    print(f"  Citation allowlist : {_count_citations()}")
     print(f"  Reading grade      : Class {TARGET_READING_GRADE}")
     print(f"  Word cap           : {HARD_CAP_WORDS}")
     print(f"  Target FAQs        : {TARGET_FAQ_COUNT}")

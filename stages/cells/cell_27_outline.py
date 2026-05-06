@@ -1,46 +1,39 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
-
-
-from stages.cells.cell_23_shared_utils import *
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ─── CELL: H2/H3 Strategic Outline + Content Gap Analysis ────────────
-# SINGLE-ARTICLE PARADIGM:
-#   Merges ALL PAA, Autocomplete, Related Searches across all keywords
-#   into ONE unified blog outline for the single article.
+# ─────────────────────────────────────────────────────────────
+# BLOG OUTLINE GENERATOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates a strategic H2/H3 blog outline using Gemini,
+#   combining SERP data, competitor structure, and forum insights.
 #
-# Reads  : Keyword_n8n > H1_Meta_Output tab      (primary keyword, countries, chosen H1)
-#         : Keyword_n8n > keyword tab             (fallback for keyword list)
-#         : Keyword_n8n > Url_data_ext tab        (all competitor H2/H3 structures)
-#         : Keyword_n8n > PAA tab                 (ALL PAA questions across all keywords)
-#         : Keyword_n8n > Other_Autocomplete tab  (ALL autocomplete across all keywords)
-#         : Keyword_n8n > Related_search tab      (ALL related searches)
-#         : Keyword_n8n > Forum_Master_Insights   (NEW: Content_Gap + Objection + Patient_Question)
-#         : Keyword_n8n > Forum_Master_MD         (NEW: patient voice + emotion vocabulary)
-# Writes : Keyword_n8n > Blog_Outline tab         (ONE row — the single article outline)
-# ─────────────────────────────────────────────────────────────────────
+# INPUT:
+#   - H1/meta output (R2 + Postgres)
+#   - competitor_pages (H2/H3 + FAQs)
+#   - paa_questions
+#   - search_suggestions (autocomplete + related)
+#   - forum_master_insights
+#
+# PROCESS:
+#   - Loads unified article brief
+#   - Aggregates SERP + forum intelligence
+#   - Builds structured prompt with caps
+#   - Generates outline via Gemini
+#   - Parses structured sections
+#
+# OUTPUT:
+#   - Markdown outline → R2 (blog/{run_id}/outline.md)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Single-article paradigm (all keywords merged)
+#   - Includes gap analysis + SEO tagging
+#   - Critical for downstream blog generation
+# ─────────────────────────────────────────────────────────────
 
-import json, time, re, os
+import json
+import os
+import re
+import time
+
 from psycopg2.extras import Json
 from google import genai
 from google.genai import types
@@ -48,6 +41,10 @@ from google.genai import types
 from app.database import fetch_all, fetch_one, execute
 from app.repositories.run_repo import get_run_keywords
 from app.storage import r2_get_text, r2_put_text
+
+from stages.cells.cell_23_shared_utils import *
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
+
 # ── Config ────────────────────────────────────────────────────────────
 
 GEMINI_MODEL      = "gemini-2.5-flash"
@@ -145,24 +142,13 @@ def parse_outline_sections(raw_text):
     }
 
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
 
-
-# ── FIX 1 + FIX 2: increased max_tokens default + use resp.text ───────
-# FIX 1: max_tokens raised from 6000 → 16000
-#   gemini-2.5-flash thinking mode consumes tokens from the same
-#   max_output_tokens budget. With 6000, ~5500 tokens go to internal
-#   thinking, leaving ~500 for actual output — outline cuts off at H2 #5.
-#   16000 gives enough headroom for thinking + a full outline.
-#
-# FIX 2: resp.text instead of resp.candidates[0].content.parts[0].text
-#   gemini-2.5-flash can return thinking as parts[0] (thought=True).
-#   Accessing parts[0].text directly returns the thinking block, not the
-#   actual outline. resp.text skips thinking parts and returns only the
-#   real response, correctly concatenated.
+# ── Gemini call handling (token + response fixes)
+# ── Prompt size control (caps applied)
 def call_gemini(prompt, max_tokens=16000):   # ← FIX 1: was 6000
     for attempt in range(3):
         try:

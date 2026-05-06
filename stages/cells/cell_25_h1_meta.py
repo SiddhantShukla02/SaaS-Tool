@@ -1,18 +1,36 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# H1 + META GENERATOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates SEO-optimized H1 options, meta titles, and meta
+#   descriptions using Gemini, based on keyword and SERP data.
+#
+# INPUT:
+#   - run_keywords (Postgres)
+#   - competitor_pages (H1 + meta data)
+#   - paa_questions
+#
+# PROCESS:
+#   - Builds article brief from keywords
+#   - Generates H1 options (Gemini call 1)
+#   - Generates meta titles/descriptions (Gemini call 2)
+#   - Parses structured output
+#
+# OUTPUT:
+#   - Markdown output → R2 (blog/{run_id}/h1_meta.md)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Uses shared_utils for parsing
+#   - Uses 2-step Gemini generation for quality
+#   - High-impact SEO stage
+# ─────────────────────────────────────────────────────────────
 
-from stages.cells.cell_23_shared_utils import *
+import json
+import os
+import re
+import time
 
-# ─── CELL: H1 / Meta Title / Meta Description Generator ──────────────
-import json, time, re, os
 from psycopg2.extras import Json
 from google import genai
 from google.genai import types
@@ -20,6 +38,9 @@ from google.genai import types
 from app.database import fetch_all, execute
 from app.repositories.run_repo import get_run_keywords
 from app.storage import r2_put_text
+
+from stages.cells.cell_23_shared_utils import *
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
 
 GEMINI_MODEL      = "gemini-2.5-flash"
 MAX_CELL          = 49000

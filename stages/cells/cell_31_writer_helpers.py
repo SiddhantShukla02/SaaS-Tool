@@ -1,19 +1,36 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# WRITER HELPERS + FINAL REVIEW
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Provides helper functions for cleaning generated blog sections,
+#   improving hook variety, and running the final review pass.
+#
+# INPUT:
+#   - Generated blog section text
+#   - Blog plan / metadata
+#
+# PROCESS:
+#   - Removes formatting artifacts
+#   - Normalizes invalid heading depth
+#   - Replaces overused AI-style phrases
+#   - Creates section-specific hook openers
+#   - Runs final Python cleanup + Gemini editorial review
+#
+# OUTPUT:
+#   - Cleaned / revised blog markdown
+#
+# NOTES:
+#   - Helper-only cell; no DB/R2 writes
+#   - Used by the blog writer cell
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-
+import re
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
 from stages.cells.cell_23_shared_utils import *
 
 # ══════════════════════════════════════════════════════════════════════
-# LAYER B: POST-SECTION CLEANING
+# POST-SECTION CLEANING
 # ══════════════════════════════════════════════════════════════════════
 
 def clean_section_text(text):
@@ -46,7 +63,7 @@ def clean_section_text(text):
             cleaned.append(line)
     result = '\n'.join(cleaned)
 
-    # FIX E: Strip debug artifacts and pipeline metadata
+    # Strip debug artifacts and pipeline metadata
     # These leak from forum insights tags and hook labels into Gemini output
     result = re.sub(r'\(Emo\)', '', result)
     result = re.sub(r'\(TOFU\)|\(MOFU\)|\(BOFU\)', '', result)
@@ -198,7 +215,7 @@ def detect_repeated_opener(new_text, seen_openers, threshold=50):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# LAYER C: FINAL QA REVIEW PASS
+# FINAL QA REVIEW PASS
 # ══════════════════════════════════════════════════════════════════════
 
 def run_final_review_pass(full_blog, plan):

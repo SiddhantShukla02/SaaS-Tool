@@ -1,46 +1,53 @@
-# ─── CELL: Enhanced Blog Writer (REVISED) ────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# BLOG WRITER (AEO / GEO / YMYL)
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates the final blog article using structured outline,
+#   empathy hooks, forum insights, and keyword intelligence.
 #
-# CHANGES FROM V15:
-#   1. AEO/GEO rules baked into section prompt:
-#      - Answer-first paragraphs (first 2 sentences answer the H2 directly)
-#      - Entity-explicit naming (no "our partner hospital")
-#      - Statistical density target (≥ 5 stats per 1000 words)
-#      - "X is Y" definitions for first mention of medical entities
-#      - Passage self-containment (no "as discussed above")
-#      - Comparison tables, not prose, for any comparison
-#      - Speakable-sentence flagging for dev team
+# INPUT:
+#   - blog_outline (R2 + Postgres)
+#   - empathy_faq output
+#   - competitor_keywords (structured keyword clusters)
+#   - forum_master_md (patient insights)
+#   - run_keywords (country + persona context)
 #
-#   2. YMYL guardrails:
-#      - No specific dosages, surgical self-care, diagnostic claims
-#      - Mandatory disclaimer on clinical outcome claims
-#      - Citation requirement for every medical factual claim
-#      - Author byline / medical reviewer placeholder
+# PROCESS:
+#   - Parses outline into structured H2/H3 sections
+#   - Generates each section using Gemini
+#   - Applies:
+#       → AEO rules (answer-first, entity clarity, self-contained sections)
+#       → GEO rules (locale-aware content, currency, trust signals)
+#       → YMYL safeguards (medical safety, disclaimers, citations)
+#       → Persona targeting (country-specific concerns + tone)
+#   - Enforces:
+#       → statistical density
+#       → comparison tables where required
+#       → section-level keyword relevance
+#   - Builds full blog incrementally
+#   - Extracts:
+#       → speakable sentences
+#       → citation candidates
 #
-#   3. Locale-aware framing:
-#      - Pulls persona matrix from config per target country
-#      - Currency, language, trust signals applied throughout
-#      - Country-specific objections addressed
+# OUTPUT:
+#   - Final blog → R2 (blog/{run_id}/final.md)
+#   - Speakables → R2 (outputs/{run_id}/speakable.json)
+#   - Citations → R2 (outputs/{run_id}/citations.json)
+#   - Metadata → Postgres (generated_outputs)
 #
-#   4. Replaces post-hoc banned_phrase dict with positive-example prompting.
-#      The v15 approach of "never use these 30 words" then regex-replacing
-#      is replaced with "here's the voice we want" + 3 positive examples.
-#
-#   5. Reading grade target: Class 8 (was ambiguous).
-#
-#   6. Structured output includes Speakable candidates and citation list
-#      for handoff to dev team and blog-grade-reducer skill.
-#
-# Reads  : Keyword_n8n > Blog_Outline, Empathy_FAQ_Output, H1_Meta_Output,
-#          Keyword_data (JSON), keyword, Forum_Master_MD
-# Writes : Keyword_n8n > Blog_Output, Speakable_Candidates, Citation_List
-#          Google Doc   > Blog_Writeup
-# ─────────────────────────────────────────────────────────────────────
+# NOTES:
+#   - Central content generation stage
+#   - Replaces legacy Sheets/Docs-based blog pipeline
+#   - Uses prompt-driven voice control instead of post-processing bans
+#   - Designed for SEO + AEO + medical compliance
+# ─────────────────────────────────────────────────────────────
 
 import json
-import time
-import re
 import os
+import re
+import time
 from datetime import datetime
+
 from psycopg2.extras import Json
 from google import genai
 from google.genai import types
@@ -50,13 +57,12 @@ from app.repositories.run_repo import get_run_keywords
 from app.storage import r2_get_text, r2_put_text
 
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
-    MAX_CELL, MAX_TOKENS, SAFETY_OFF, SCOPES,
+    GEMINI_API_KEY, GEMINI_MODEL,
+    MAX_CELL, MAX_TOKENS, SAFETY_OFF,
     TARGET_WORDS_PER_SECTION, HARD_CAP_WORDS, TARGET_READING_GRADE,
     MIN_STATS_PER_1000, YMYL_DISCLAIMERS,
     get_country_name, get_persona,
 )
-
 
 from stages.cells.cell_23_shared_utils import *
 
@@ -747,7 +753,10 @@ def main():
     print("✍️  BLOG WRITER (REVISED — AEO/GEO/YMYL/Locale)")
     print("="*65)
 
-    run_id = int(os.getenv("RUN_ID"))
+    run_id_raw = os.getenv("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    run_id = int(run_id_raw)
 
     plan = load_blog_plan(run_id)
 
@@ -761,21 +770,16 @@ def main():
     print(f"  🎯 Personas : {len(plan['personas'])} loaded")
     print(f"  🔑 Keywords : {len(plan['keyword_pool'])} total ({len(plan['keyword_by_category'])} categories)")
 
-    # NOTE: The full section-by-section loop from v15 Cell 33 lines 789-1151
-    # continues here with the same structure, but each section prompt now uses
-    # the new build_section_prompt() above with all AEO/GEO/YMYL/voice rules.
-    #
-    # After generating all sections, the revised pipeline:
-    #   1. Extracts Speakable candidates → writes to Speakable_Candidates tab
-    #   2. Extracts citations → writes to Citation_List tab (dev team verifies)
+    # After generating all sections, the pipeline:
+    #   1. Extracts Speakable candidates → stored in R2 + Postgres
+    #   2. Extracts citations → stored for downstream validation
     #   3. Strips [SPEAKABLE] tags from the final blog
-    #   4. Writes the cleaned blog to Google Doc (same as v15)
+    #   4. Cleans blog output (removes internal markers)
     #   5. Hands off to the blog-grade-reducer skill for Class 7-8 reduction
-    #
-    # The v15 post-hoc banned_phrase dict and make_unique_hook() are REMOVED.
-    # Those behaviors are now pushed into the section prompt via the voice brief.
 
-# Parse the v15 Cell 27 outline into structured sections
+
+    
+    # Parse the outline into structured sections
     all_sections = parse_v15_outline_to_sections(plan["outline"])
     body_sections, faq_section, conclusion_section = split_sections_by_type(all_sections)
 
