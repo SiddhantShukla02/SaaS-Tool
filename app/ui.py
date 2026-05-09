@@ -389,37 +389,75 @@ def render_dashboard():
 
     st.divider()
 
-    # New run form
+       # New run form
     with st.expander("➕ Start new run", expanded=not bool(db.list_runs(limit=1))):
         st.markdown(
-            "**Step 1:** Enter keyword + target countries below.  \n"
+            "**Step 1:** Add one keyword-country pair per row.  \n"
             "**Step 2:** Click Start to begin Stage 1 - Search discovery."
         )
+        st.caption(
+            "Keyword text is preserved exactly except leading/trailing spaces. "
+            "Country codes are normalized to lowercase."
+        )
+
+        default_keyword_rows = [
+            {"keyword": "", "country_code": ""},
+            {"keyword": "", "country_code": ""},
+            {"keyword": "", "country_code": ""},
+        ]
+
         with st.form("new_run"):
-            keyword = st.text_input(
-                "Primary keyword",
-                placeholder="e.g. cornea transplant cost india",
+            keyword_table = st.data_editor(
+                default_keyword_rows,
+                column_config={
+                    "keyword": st.column_config.TextColumn(
+                        "Keyword",
+                        help="Exact search keyword/topic to run",
+                        required=False,
+                    ),
+                    "country_code": st.column_config.TextColumn(
+                        "Country code",
+                        help="2-letter country code, e.g. uk, ae, ng",
+                        max_chars=2,
+                        required=False,
+                    ),
+                },
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="keyword_country_editor",
             )
-            countries_raw = st.text_input(
-                "Country codes (comma-separated, 2-letter)",
-                placeholder="e.g. ae, ng, gb, au",
-            )
+
             submit = st.form_submit_button("Start run", type="primary")
 
         if submit:
-            if not keyword.strip():
-                st.error("Enter a keyword")
+            keyword_rows = []
+
+            for row in keyword_table:
+                keyword = str(row.get("keyword", "")).strip()
+                country_code = str(row.get("country_code", "")).strip().lower()
+
+                if not keyword and not country_code:
+                    continue
+
+                keyword_rows.append({
+                    "keyword": keyword,
+                    "country_code": country_code,
+                })
+
+            if not keyword_rows:
+                st.error("Add at least one keyword-country pair.")
             else:
-                ccs = [c.strip().lower() for c in countries_raw.split(",") if c.strip()]
-                if not ccs:
-                    st.error("Enter at least one country code")
-                else:
+                try:
                     run_id = orchestrator.start_run(
-                        keyword.strip(), ccs, auth.current_user(),
+                        keyword_rows,
+                        auth.current_user(),
                     )
                     st.success(f"Run #{run_id} queued — Stage 1 starting")
                     st.query_params["run"] = str(run_id)
                     st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
     # Runs list
     st.markdown("#### Runs")

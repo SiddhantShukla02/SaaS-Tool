@@ -25,21 +25,52 @@ from app.job_queue import enqueue
 # User-facing actions
 # ─────────────────────────────────────────────────────────────
 
-def start_run(keyword: str, countries: list, created_by: str) -> int:
-    run_id = create_run(keyword, created_by)
+def start_run(keyword_rows: list[dict], created_by: str) -> int:
+    if not keyword_rows:
+        raise ValueError("At least one keyword-country pair is required")
 
-    keyword_rows = [
-        {
+    cleaned_rows = []
+    seen_pairs = set()
+
+    for row in keyword_rows:
+        keyword = str(row.get("keyword", "")).strip()
+        country_code = str(row.get("country_code", "")).strip().lower()
+
+        if not keyword and not country_code:
+            continue
+
+        if not keyword:
+            raise ValueError("Each row must include a keyword")
+
+        if not country_code:
+            raise ValueError(f"Country code is required for keyword: {keyword}")
+
+        if len(country_code) != 2:
+            raise ValueError(
+                f"Country code must be 2 letters for keyword '{keyword}': {country_code}"
+            )
+
+        pair_key = (keyword, country_code)
+        if pair_key in seen_pairs:
+            continue
+
+        seen_pairs.add(pair_key)
+        cleaned_rows.append({
             "keyword": keyword,
             "country_code": country_code,
-        }
-        for country_code in countries
-    ]
+        })
 
-    insert_run_keywords(run_id, keyword_rows)
+    if not cleaned_rows:
+        raise ValueError("At least one valid keyword-country pair is required")
+
+    primary_keyword = cleaned_rows[0]["keyword"]
+    run_id = create_run(primary_keyword, created_by)
+
+    insert_run_keywords(run_id, cleaned_rows)
 
     db.log(run_id, "info", f"Run created by {created_by}")
-    db.log(run_id, "info", f"Stored {len(keyword_rows)} keyword/country pairs in DB")
+    db.log(run_id, "info", f"Primary keyword: {primary_keyword}")
+    db.log(run_id, "info", f"Stored {len(cleaned_rows)} keyword/country pairs in DB")
 
     _queue_stage(run_id, "stage_1_serp_paa", db.STATUS_STAGE1_RUNNING)
 
