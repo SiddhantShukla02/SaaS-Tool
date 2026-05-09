@@ -1,49 +1,53 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
-
-
-from stages.cells.cell_23_shared_utils import *
-
-# ─── CELL: Empathy Hooks + Forum-Enriched FAQ Answers ────────────────
-# SINGLE-ARTICLE PARADIGM:
-#   Reads the ONE outline row and ONE Reddit insights set.
-#   Generates empathy hooks + FAQ answers for the single article.
+# ─────────────────────────────────────────────────────────────
+# EMPATHY HOOKS + FAQ GENERATOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates empathy hooks and forum-enriched FAQ answers for
+#   the single article using outline, forum, and competitor data.
 #
-# Reads  : Keyword_n8n > Blog_Outline tab        (single row with outline + H1)
-#         : Keyword_n8n > Forum_Master_MD tab     (ALL_CATEGORIES row — replaces Reddit_Insights_MD)
-#         : Keyword_n8n > keyword tab             (fallback)
-# Writes : Keyword_n8n > Empathy_FAQ_Output tab   (ONE row)
-# ─────────────────────────────────────────────────────────────────────
+# INPUT:
+#   - blog_outline output (R2 + Postgres)
+#   - forum_master_md ALL_CATEGORIES
+#   - competitor_pages FAQ/data
+#   - paa_questions fallback
+#
+# PROCESS:
+#   - Loads article outline
+#   - Loads forum insight markdown
+#   - Extracts medical data from competitor content
+#   - Generates empathy hooks using Gemini
+#   - Extracts FAQ questions from outline
+#   - Generates fact-first FAQ answers using Gemini
+#
+# OUTPUT:
+#   - Markdown output → R2 (blog/{run_id}/empathy_faq.md)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Single-article paradigm
+#   - Uses forum language for patient empathy
+#   - FAQ answers are enriched with competitor medical data
+# ─────────────────────────────────────────────────────────────
 
-import json, time, re
-import gspread
+import json
+import os
+import re
+import time
+
+from psycopg2.extras import Json
 from google import genai
-from app.utils.helper import get_sheet_client
 from google.genai import types
 
-# ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME        = SPREADSHEET_NAME
-OUTLINE_TAB       = "Blog_Outline"
-FORUM_MD_TAB      = "Forum_Master_MD"   # ← UPDATED: replaces Reddit_Insights_MD
-KEYWORD_TAB       = "keyword"
-OUTPUT_TAB        = "Empathy_FAQ_Output"
+from app.database import fetch_all, fetch_one, execute
+from app.storage import r2_get_text, r2_put_text
 
+from stages.cells.cell_23_shared_utils import *
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
+
+# ── Config ────────────────────────────────────────────────────────────
 
 GEMINI_MODEL      = "gemini-2.5-flash"
 MAX_CELL          = 49000
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
 COUNTRY_MAP = {
     "ng": "Nigeria", "ae": "UAE", "gb": "UK", "us": "USA",
@@ -54,7 +58,6 @@ COUNTRY_MAP = {
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [
@@ -65,44 +68,14 @@ SAFETY_OFF = [
     types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY",   threshold="OFF"),
 ]
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
 
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            wait = 4 * (attempt + 1)
-            if attempt < retries - 1:
-                time.sleep(wait)
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
 
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60}
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=200, cols=10):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
-
-# FIX #1: resp.text instead of parts[0].text (Gemini 2.5 Flash thinking bug)
-# FIX #2: max_tokens 6000 → 16000 (thinking consumes ~5500 tokens)
-def call_gemini(prompt, max_tokens=16000):   # ← FIX #2: was 6000
+# ── Gemini call handling (token + response fixes)
+def call_gemini(prompt, max_tokens=16000):
     for attempt in range(3):
         try:
             resp = gemini_client.models.generate_content(
@@ -114,7 +87,7 @@ def call_gemini(prompt, max_tokens=16000):   # ← FIX #2: was 6000
                 ),
             )
             if resp.candidates:
-                return resp.text.strip()     # ← FIX #1: was parts[0].text
+                return resp.text.strip()
         except Exception as e:
             print(f"  ⚠️ Gemini attempt {attempt+1}/3: {e}")
             if attempt < 2:
@@ -126,59 +99,75 @@ def call_gemini(prompt, max_tokens=16000):   # ← FIX #2: was 6000
 # DATA LOADERS
 # ═══════════════════════════════════════════════════════════════
 
-def load_article_outline(sp):
-    """Load the single-row article outline from Blog_Outline tab."""
-    try:
-        ws = sp.worksheet(OUTLINE_TAB)
-        records = ws.get_all_records()
-        if records:
-            r = records[0]
-            return {
-                "primary_keyword": str(r.get("Primary_Keyword", "")).strip(),
-                "secondary_keywords": str(r.get("Secondary_Keywords", "")).strip(),
-                "target_countries": str(r.get("Target_Countries", "")).strip(),
-                "chosen_h1": str(r.get("Chosen_H1", "")).strip(),
-                "outline": str(r.get("Complete_Outline", "")).strip(),
-            }
-    except Exception as e:
-        print(f"  ⚠️ Blog_Outline tab not found: {e}")
-    return None
+def current_run_id() -> int:
+    run_id_raw = os.getenv("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    return int(run_id_raw)
 
 
-# FIX #3: Prefer ALL_CATEGORIES row (pre-merged by Cell 19)
-def load_all_forum_data(sp):
-    """Load forum insights — prefers ALL_CATEGORIES row, falls back to merge."""
-    try:
-        ws      = sp.worksheet(FORUM_MD_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        # Fallback: try legacy Reddit_Insights_MD
+def load_article_outline(run_id: int):
+    """
+    Load outline from R2 (generated_outputs → blog_outline)
+    """
+    row = fetch_one(
+        """
+        SELECT r2_key, metadata_json
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "blog_outline"),
+    )
+
+    if not row:
+        return None
+
+    text = r2_get_text(row["r2_key"])
+    metadata = row.get("metadata_json") or {}
+
+    if isinstance(metadata, str):
         try:
-            ws      = sp.worksheet("Reddit_Insights_MD")
-            records = ws.get_all_records()
-            all_md  = [str(r.get("Prompt_Ready_Markdown","")).strip() for r in records]
-            return "\n\n---\n\n".join(m for m in all_md if m and m != "nan")
+            metadata = json.loads(metadata)
         except Exception:
-            return ""
+            metadata = {}
 
-    # Prefer ALL_CATEGORIES row (all 9 categories pre-merged)
-    for r in records:
-        if str(r.get("Insight_Type","")).strip() == "ALL_CATEGORIES":
-            md = str(r.get("Prompt_Ready_Markdown","")).strip()
-            if md and md != "nan":
-                print(f"  📣 Forum_Master_MD (ALL_CATEGORIES): {len(md):,} chars")
-                return md
+    return {
+        "primary_keyword": metadata.get("primary_keyword", ""),
+        "secondary_keywords": metadata.get("secondary_keywords", []),
+        "target_countries": metadata.get("target_countries", ""),
+        "chosen_h1": metadata.get("chosen_h1", ""),
+        "outline": text or "",
+    }
 
-    # Fallback: merge individual category rows
-    all_md = []
-    for r in records:
-        md = str(r.get("Prompt_Ready_Markdown","")).strip()
-        if md and md != "nan":
-            all_md.append(md)
-    merged = "\n\n---\n\n".join(all_md)
-    print(f"  📣 Forum_Master_MD (merged {len(all_md)} categories): {len(merged):,} chars")
-    return merged
 
+
+
+# Prefer ALL_CATEGORIES row generated by forum classification.
+def load_all_forum_data(run_id: int):
+    """
+    Load Forum_Master_MD ALL_CATEGORIES from R2 via forum_master_md pointer table.
+    """
+    row = fetch_one(
+        """
+        SELECT r2_key
+        FROM forum_master_md
+        WHERE run_id = %s
+          AND insight_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "ALL_CATEGORIES"),
+    )
+
+    if not row:
+        return ""
+
+    md = r2_get_text(row["r2_key"])
+    print(f"  📣 Forum_Master_MD (ALL_CATEGORIES): {len(md):,} chars")
+    return md
 
 def extract_from_outline(outline_text, pattern, group=1):
     """Extract items from outline text using a regex pattern."""
@@ -254,26 +243,40 @@ CTA/Conclusion Hook:
 [2-3 sentences]"""
 
 
-def extract_medical_data_from_competitors(sp):
-    """Dynamically extract cost figures and hospital names from competitor scraped content."""
-    try:
-        ws = sp.worksheet("Url_data_ext")
-        records = ws.get_all_records()
-    except Exception:
-        return "(No competitor data available — use your medical knowledge for approximate figures.)"
+def extract_medical_data_from_competitors(run_id: int):
+    """
+    Extract cost/hospital/treatment data from competitor_pages DB + R2 text.
+    """
+    rows = fetch_all(
+        """
+        SELECT url, clean_r2_key, faqs_json, others_json
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
 
-    # Combine all competitor text
     all_text = ""
-    for r in records:
-        text = str(r.get("Texts_Only", "")).strip()
-        faqs = str(r.get("FAQs", "")).strip()
-        others = str(r.get("Others", "")).strip()
-        all_text += f" {text[:len(text)]} {faqs} {others}"
+
+    for r in rows:
+        clean_text = ""
+
+        if r.get("clean_r2_key"):
+            try:
+                clean_text = r2_get_text(r["clean_r2_key"])
+            except Exception:
+                clean_text = ""
+
+        faq_text = json.dumps(r.get("faqs_json") or [], ensure_ascii=False)
+        others_text = json.dumps(r.get("others_json") or [], ensure_ascii=False)
+
+        all_text += f" {clean_text} {faq_text} {others_text}"
 
     if len(all_text) < 100:
         return "(Limited competitor data — use general medical tourism pricing knowledge.)"
 
-    # Use Gemini to extract structured data
     extraction_prompt = f"""Extract medical cost data from competitor content below.
 Return ONLY a bullet-point list.
 
@@ -298,69 +301,94 @@ COMPETITOR CONTENT:
 {all_text[:len(all_text)]}"""
 
     result = call_gemini(extraction_prompt, max_tokens=2000)
-    if result:
-        return result
-    return "(Could not extract medical data — use general knowledge.)"
+    return result if result else "(Could not extract medical data — use general knowledge.)"
 
 
-def load_competitor_faq_answers(sp):
+def load_competitor_faq_answers(run_id: int):
     """
-    Load competitor FAQ Q&A pairs from Url_data_ext → FAQs column.
-    Returns formatted string of competitor questions + answers with real data.
-    These are passed to P8 as REFERENCE ANSWERS alongside medical_data_block.
+    Load competitor FAQ Q&A pairs from competitor_pages.faqs_json.
     """
-    try:
-        ws = sp.worksheet("Url_data_ext")
-        records = ws.get_all_records()
-    except Exception:
-        return ""
-    
+    rows = fetch_all(
+        """
+        SELECT url, faqs_json
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
     qa_pairs = []
     seen_questions = set()
-    
-    for r in records:
-        faq_raw = str(r.get("FAQs", "")).strip()
-        url = str(r.get("URL", ""))[:60]
-        if not faq_raw or faq_raw == "nan":
+
+    for r in rows:
+        faq_raw = r.get("faqs_json")
+        url = str(r.get("url", "") or "")[:60]
+
+        if not faq_raw:
             continue
-        
-        # Parse Q/A pairs
-        pairs = re.findall(
-            r'Q\d+\s*:\s*(.+?)\s*\nA\d+\s*:\s*(.+?)(?=\nQ\d+\s*:|$)',
-            faq_raw, re.DOTALL
-        )
-        for q, a in pairs:
-            q = q.strip()
-            a = a.strip()
-            if q and a and len(q) > 10 and q.lower() not in seen_questions:
-                qa_pairs.append({"q": q, "a": a[:200], "source": url})
-                seen_questions.add(q.lower())
-    
+
+        if isinstance(faq_raw, str):
+            try:
+                faq_data = json.loads(faq_raw)
+            except Exception:
+                faq_data = faq_raw
+        else:
+            faq_data = faq_raw
+
+        if isinstance(faq_data, list):
+            for item in faq_data:
+                if not isinstance(item, dict):
+                    continue
+
+                q = str(item.get("question", "") or item.get("Question", "") or "").strip()
+                a = str(item.get("answer", "") or item.get("Answer", "") or "").strip()
+
+                if q and a and len(q) > 10 and q.lower() not in seen_questions:
+                    qa_pairs.append({"q": q, "a": a[:200], "source": url})
+                    seen_questions.add(q.lower())
+
+        elif isinstance(faq_data, str):
+            pairs = re.findall(
+                r'Q\d+\s*:\s*(.+?)\s*\nA\d+\s*:\s*(.+?)(?=\nQ\d+\s*:|$)',
+                faq_data,
+                re.DOTALL,
+            )
+
+            for q, a in pairs:
+                q = q.strip()
+                a = a.strip()
+
+                if q and a and len(q) > 10 and q.lower() not in seen_questions:
+                    qa_pairs.append({"q": q, "a": a[:200], "source": url})
+                    seen_questions.add(q.lower())
+
     if not qa_pairs:
         return ""
-    
-    # Format for prompt injection
+
     lines = ["COMPETITOR FAQ ANSWERS (use these real figures in YOUR answers):"]
-    for i, pair in enumerate(qa_pairs[:10], 1):
+
+    for pair in qa_pairs[:10]:
         lines.append(f"  Q: {pair['q']}")
         lines.append(f"  A: {pair['a']}")
         lines.append(f"  Source: {pair['source']}")
         lines.append("")
-    
+
     return "\n".join(lines)
 
 
-def build_faq_answers_prompt(article_data, forum_data):
+def build_faq_answers_prompt(article_data, forum_data, run_id: int, faq_questions: list):
     primary = article_data["primary_keyword"]
     countries = article_data["target_countries"]
     chosen_h1 = article_data["chosen_h1"]
     outline = article_data["outline"]
 
     # Dynamically extract medical data from competitor content
-    medical_data_block = extract_medical_data_from_competitors(sp)
+    medical_data_block = extract_medical_data_from_competitors(run_id)
     
     # Load competitor FAQ answers — real Q&A pairs with actual ₹ figures
-    comp_faq_answers = load_competitor_faq_answers(sp)
+    comp_faq_answers = load_competitor_faq_answers(run_id)
 
     # Use the faq_questions already extracted in main execution
     faq_block = "\n".join(f"  {i}. {q}" for i, q in enumerate(faq_questions[:len(faq_questions)], 1))
@@ -411,9 +439,9 @@ print("💬 EMPATHY HOOKS + FORUM-ENRICHED FAQ ANSWERS")
 print("   Mode: SINGLE ARTICLE")
 print("="*65)
 
-sp = gc.open(SHEET_NAME)
+run_id = current_run_id()
 
-article_data = load_article_outline(sp)
+article_data = load_article_outline(run_id)
 
 if not article_data:
     print("❌ No outline found. Run the Blog Outline cell first.")
@@ -422,12 +450,12 @@ else:
     print(f"  🌍 Countries: {article_data['target_countries']}")
 
     # Load ALL forum data (merged across all keyword variations)
-    forum_data = load_all_forum_data(sp)
+    forum_data = load_all_forum_data(run_id)
     print(f"  📣 Forum data: {'✅ ' + str(len(forum_data)) + ' chars' if forum_data else '⚠️ Not available'}")
 
     # Extract medical data from competitors (used in FAQ, also available for hooks)
     print(f"\n  📊 Extracting medical data from competitor content...")
-    medical_data = extract_medical_data_from_competitors(sp)
+    medical_data = extract_medical_data_from_competitors(run_id)
     print(f"  {'✅ Extracted' if 'Not available' not in medical_data[:50] else '⚠️ Limited data'}")
 
     # Generate empathy hooks
@@ -435,7 +463,7 @@ else:
     hooks_result = call_gemini(build_empathy_hooks_prompt(article_data, forum_data), max_tokens=3000)
     time.sleep(4)
 
-# Generate FAQ answers
+    # Generate FAQ answers
     faq_result = ""
     outline = article_data["outline"]
 
@@ -452,25 +480,38 @@ else:
     # Try ### heading questions
     if not faq_questions:
         faq_questions = [m.group(1).strip() for m in re.finditer(r'###\s*(.+\?)', outline) if len(m.group(1).strip()) > 10]
-    # Fallback: load PAA questions directly
+    # Fallback: load PAA questions directly from DB
     if not faq_questions:
-        try:
-            paa_ws = sp.worksheet("PAA")
-            paa_recs = paa_ws.get_all_records()
-            seen = set()
-            for pr in paa_recs:
-                q = str(pr.get("Question", "")).strip()
-                if q and q.lower() not in seen:
-                    faq_questions.append(q)
-                    seen.add(q.lower())
-        except Exception:
-            pass
+        rows = fetch_all(
+            """
+            SELECT question
+            FROM paa_questions
+            WHERE run_id = %s
+            ORDER BY position ASC
+            """,
+            (run_id,),
+        )
+
+        seen = set()
+        for row in rows:
+            q = str(row.get("question", "") or "").strip()
+            if q and q.lower() not in seen:
+                faq_questions.append(q)
+                seen.add(q.lower())
     print(f"  📋 FAQ questions found: {len(faq_questions)}")
 
     faq_count = len(faq_questions)
     if faq_count > 0:
         print(f"  🤖 Generating FAQ answers ({faq_count} questions)...")
-        faq_result = call_gemini(build_faq_answers_prompt(article_data, forum_data), max_tokens=5000)
+        faq_result = call_gemini(
+            build_faq_answers_prompt(
+                article_data,
+                forum_data,
+                run_id,
+                faq_questions
+            ),
+            max_tokens=5000
+        )
         time.sleep(4)
     else:
         print(f"  ⚠️ No FAQ questions found in outline")
@@ -482,32 +523,62 @@ else:
         emotion_map = em_match.group(1).strip()
     hooks_only = hooks_result[:em_match.start()].strip() if em_match and hooks_result else (hooks_result or "")
 
-    # Write ONE row
-    out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=10, cols=7)
-    HEADERS = [
-        "Primary_Keyword", "Target_Countries", "Chosen_H1",
-        "Empathy_Hooks", "FAQ_Answers", "Emotion_Map",
-    ]
-    rows_out = [
-        HEADERS,
-        [
-            article_data["primary_keyword"],
-            article_data["target_countries"],
-            article_data["chosen_h1"],
-            _trunc(hooks_only),
-            _trunc(faq_result),
-            _trunc(emotion_map),
-        ],
-    ]
+    # Write output to R2 + generated_outputs pointer
+    output_text = f"""# Empathy FAQ Output
 
-    _write_with_retry(out_ws, rows_out)
-    _fmt_header(out_ws, len(HEADERS))
+    Primary Keyword: {article_data["primary_keyword"]}
+    Target Countries: {article_data["target_countries"]}
+    Chosen H1: {article_data["chosen_h1"]}
 
+    ## Empathy Hooks
+
+    {hooks_only}
+
+    ## FAQ Answers
+
+    {faq_result}
+
+    ## Emotion Map
+
+    {emotion_map}
+    """
+
+    r2_key = f"blog/{run_id}/empathy_faq.md"
+
+    r2_put_text(r2_key, output_text)
+
+    execute(
+        """
+        DELETE FROM generated_outputs
+        WHERE run_id = %s
+        AND output_type = %s
+        """,
+        (run_id, "empathy_faq"),
+    )
+
+    execute(
+        """
+        INSERT INTO generated_outputs (
+            run_id, output_type, r2_key, metadata_json
+        )
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            run_id,
+            "empathy_faq",
+            r2_key,
+            Json({
+                "primary_keyword": article_data["primary_keyword"],
+                "target_countries": article_data["target_countries"],
+                "chosen_h1": article_data["chosen_h1"],
+            }),
+        ),
+    )
     
     hook_count = hooks_only.count("### ") if hooks_only else 0
     faq_a_count = faq_result.count("**Q") if faq_result else 0
     print(f"\n  ✅ Hooks: {hook_count} sections | FAQ answers: {faq_a_count}")
     print(f"\n{'='*65}")
     print(f"✅ EMPATHY + FAQ COMPLETE — single article")
-    print(f"   Output tab: '{OUTPUT_TAB}' in '{SHEET_NAME}'")
+    print(f"   R2 output: {r2_key}")
     print(f"{'='*65}")

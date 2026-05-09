@@ -18,6 +18,7 @@ Env vars:
 
 import os
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # Set page config FIRST — before any other st.* call
 st.set_page_config(
@@ -27,10 +28,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-from app import db, orchestrator, auth          # noqa: E402
-
-# Initialise DB on first load
-db.init_db()
+from app import orchestrator, auth          # noqa: E402
+from app.repositories import state_repo as db
+from app.repositories.run_repo import get_run_country_codes
+from app.repositories.search_repo import get_serp_urls_for_run, save_selected_urls
 
 # Require login
 auth.require_auth()
@@ -69,8 +70,8 @@ STATUS_LABELS = {
     db.STATUS_DRAFT:              ("Draft", "pill-draft"),
     db.STATUS_STAGE1_RUNNING:     ("Stage 1 running", "pill-running"),
     db.STATUS_STAGE2_RUNNING:     ("Stage 2 running", "pill-running"),
-    db.STATUS_AWAITING_FINAL_URL: ("Awaiting Final_URL", "pill-gate"),
-    db.STATUS_STAGE3_RUNNING:     ("Stage 3 running (blog)", "pill-running"),
+    db.STATUS_AWAITING_FINAL_URL: ("Awaiting URL selection", "pill-gate"),
+    db.STATUS_STAGE3_RUNNING:     ("Stage 3 running (Blog writing)", "pill-running"),
     db.STATUS_BLOG_READY:         ("Blog ready", "pill-done"),
     db.STATUS_BANK_RUNNING:       ("Building question bank", "pill-running"),
     db.STATUS_BANK_READY:         ("Question bank ready", "pill-done"),
@@ -139,10 +140,10 @@ def render_run_detail(run_id: int):
     # Title + status
     col_l, col_r = st.columns([5, 1])
     with col_l:
-        st.markdown(f"### {run['keyword']}")
+        st.markdown(f"### {run['primary_keyword']}")
         st.caption(
             f"Run #{run['id']} · created by {run['created_by']} · "
-            f"{run['created_at'].replace('T', ' ')}"
+            f"{str(run['created_at']).replace('T', ' ')}"
         )
     with col_r:
         st.markdown(status_pill(run["status"]), unsafe_allow_html=True)
@@ -150,13 +151,26 @@ def render_run_detail(run_id: int):
     # Info tiles
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Target countries", ", ".join(run["countries"]) or "—")
+        country_codes = get_run_country_codes(run["id"])
+        st.metric("Target countries", ", ".join(country_codes) or "—")
     with m2:
-        st.metric("Estimated cost", f"${run['estimated_cost_usd']:.2f}")
+        st.metric("Run ID", f"#{run['id']}")
     with m3:
-        blog_url = run.get("blog_doc_url")
-        if blog_url:
-            st.markdown(f"**Blog:** [Open doc ↗]({blog_url})")
+        from app.database import fetch_one
+
+        blog_row = fetch_one(
+            """
+            SELECT r2_key
+            FROM generated_outputs
+            WHERE run_id = %s AND output_type = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (run["id"], "blog"),
+        )
+
+        if blog_row:
+            st.markdown(f"**Blog:** `{blog_row['r2_key']}`")
         else:
             st.markdown("**Blog:** *(not ready yet)*")
 
@@ -170,11 +184,11 @@ def render_run_detail(run_id: int):
     st.markdown("#### Pipeline progress")
     execs = db.get_stage_executions(run_id)
     STAGE_DISPLAY = {
-        "stage_1_serp_paa": "Stage 1 — SERP + PAA (Cell 3)",
-        "stage_2_context":  "Stage 2 — Context (Cells 5,7,16,18,20,21)",
-        "stage_3_blog":     "Stage 3 — Blog (Cells 9,12,14,25,27,29,33)",
-        "stage_4_bank":     "Stage 4 — Question Bank (Cell A)",
-        "stage_5_drafts":   "Stage 5 — Platform Drafts (Cell B)",
+        "stage_1_serp_paa": "Stage 1 — Search discovery (Cells 1,3,5,7)",
+        "stage_2_context":  "Stage 2 — Context build (Competitor + Forums)",
+        "stage_3_blog":     "Stage 3 — Blog writing (Cells 23,25,27,29,31,33)",
+        "stage_4_bank":     "Stage 4 — Question Bank",
+        "stage_5_drafts":   "Stage 5 — Platform Drafts",
     }
     if not execs:
         st.info("No stages have run yet.")
@@ -196,20 +210,49 @@ def render_run_detail(run_id: int):
     if run["status"] == db.STATUS_AWAITING_FINAL_URL:
         st.markdown(
             '<div class="gate-box"><strong>Action needed:</strong> '
-            'open the Google Sheet, go to the Final_URL tab, paste the 5–8 '
-            'competitor URLs you want to use, and click the green button '
-            'when done. Stage 3 will then run automatically to blog completion.'
+            'Select or paste the competitor URLs you want to use. '
+            'These will be saved to the database before context extraction runs.'
             '</div>',
             unsafe_allow_html=True,
         )
+
+        serp_rows = get_serp_urls_for_run(run_id)
+
+        st.markdown("##### SERP URLs found")
+
+        selected_from_serp = []
+
+        for row in serp_rows:
+            label = f"{row['rank']}. {row['url']}"
+            checked = st.checkbox(label, key=f"serp-url-{row['id']}")
+            if checked:
+                selected_from_serp.append(row["url"])
+
+        manual_urls_raw = st.text_area(
+            "Additional/manual URLs, one per line",
+            placeholder="https://example.com/page-1\nhttps://example.com/page-2",
+        )
         col_a, col_b = st.columns([1, 1])
         with col_a:
-            if st.button("✓ Final_URL ready, run Stage 3", type="primary",
-                          use_container_width=True):
+            if st.button("✓ URLs ready, run Stage 2 - Context build", type="primary",
+                        use_container_width=True):
                 try:
-                    orchestrator.mark_final_url_ready(run_id, auth.current_user())
-                    st.success("Stage 3 queued!")
-                    st.rerun()
+                    manual_urls = [
+                        url.strip()
+                        for url in manual_urls_raw.splitlines()
+                        if url.strip()
+                    ]
+
+                    final_urls = list(dict.fromkeys(selected_from_serp + manual_urls))
+
+                    if not final_urls:
+                        st.error("Please select or enter at least one URL.")
+                    else:
+                        save_selected_urls(run_id, final_urls)
+                        orchestrator.mark_final_url_ready(run_id, auth.current_user())
+                        st.success("URLs saved. Stage 2 - Context build is queued!")
+                        st.rerun()
+
                 except Exception as e:
                     st.error(str(e))
         with col_b:
@@ -218,10 +261,20 @@ def render_run_detail(run_id: int):
                 st.rerun()
 
     elif run["status"] == db.STATUS_FAILED:
-        st.error(f"Failed at: {run.get('failed_at_stage', 'unknown')}")
+        failed_stage = run.get("failed_at_stage", "unknown")
+
+        if failed_stage == "stage_5_drafts":
+            st.warning(
+                "Platform draft generation failed. "
+                "Your blog and question bank are still available."
+            )
+        else:
+            st.error(f"Failed at: {failed_stage}")
+
         if run.get("error_message"):
             with st.expander("Error message"):
                 st.code(run["error_message"])
+
         if st.button("🔁 Retry failed stage", type="primary"):
             try:
                 orchestrator.retry_failed_stage(run_id)
@@ -267,10 +320,11 @@ def render_run_detail(run_id: int):
             st.warning("Stop requested. The current cell may finish, but no further cells/stages will start.")
             st.rerun()
             
-        # Auto-refresh while running
-        import time as _time
-        _time.sleep(2)
-        st.rerun()
+        # Auto-refresh while running without blocking Streamlit rendering.
+        st_autorefresh(
+            interval=2000,
+            key=f"run-{run_id}-autorefresh",
+        )
 
     # ── Currently running stage ──
     running_exec = next((e for e in execs if e["status"] == "running"), None)
@@ -289,9 +343,19 @@ def render_run_detail(run_id: int):
     if not activity:
         st.caption("No activity yet.")
     else:
-        for a in reversed(activity):
+        for a in (activity):
             prefix = {"error": "🔴", "warn": "🟡", "info": "·"}.get(a["level"], "·")
-            ts = a["timestamp"].split("T")[1][:8] if "T" in a["timestamp"] else a["timestamp"]
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            timestamp_text = str(a["timestamp"])
+
+            try:
+                dt = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+                dt_ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+                ts = dt_ist.strftime("%H:%M:%S")
+            except Exception:
+                ts = timestamp_text[11:19]  # fallback
 
             msg = a["message"]
 
@@ -328,9 +392,8 @@ def render_dashboard():
     # New run form
     with st.expander("➕ Start new run", expanded=not bool(db.list_runs(limit=1))):
         st.markdown(
-            "**Step 1 (manual):** In your Google Sheet (`Keyword_n8n`), open the "
-            "`keyword` tab and add the keyword + target country codes. "
-            "**Step 2:** Fill in below and click Start."
+            "**Step 1:** Enter keyword + target countries below.  \n"
+            "**Step 2:** Click Start to begin Stage 1 - Search discovery."
         )
         with st.form("new_run"):
             keyword = st.text_input(
@@ -369,10 +432,12 @@ def render_dashboard():
         with st.container():
             cols = st.columns([4, 1.5, 1])
             with cols[0]:
-                st.markdown(f"**{run['keyword']}**")
+                st.markdown(f"**{run['primary_keyword']}**")
+                country_codes = get_run_country_codes(run["id"])
+
                 st.caption(
-                    f"Run #{run['id']} · {', '.join(run['countries'])} · "
-                    f"{run['created_at'].replace('T', ' ')[:16]}"
+                    f"Run #{run['id']} · {', '.join(country_codes) or '—'} · "
+                    f"{str(run['created_at']).replace('T', ' ')[:16]}"
                 )
                 st.markdown(
                     progress_bar_html(orchestrator.progress_for_run(run['id'])),
@@ -380,7 +445,7 @@ def render_dashboard():
                 )
             with cols[1]:
                 st.markdown(status_pill(run["status"]), unsafe_allow_html=True)
-                st.caption(f"${run['estimated_cost_usd']:.2f}")
+                st.caption("")
             with cols[2]:
                 if st.button("Open", key=f"open-{run['id']}", use_container_width=True):
                     st.query_params["run"] = str(run["id"])

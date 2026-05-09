@@ -1,56 +1,41 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# BRAVE FORUM SEARCH COLLECTOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Finds patient discussions across Quora, forums, review sites,
+#   and Reddit-indexed pages using Brave Search API.
+#
+# INPUT:
+#   - run_keywords (Postgres)
+#     → keyword
+#
+# PROCESS:
+#   - Builds source-specific Brave queries
+#   - Searches Quora, health forums, and review pages
+#   - Normalizes titles, snippets, URLs, and source type
+#
+# OUTPUT:
+#   - Forum search results → Postgres via insert_forum_search_result
+#
+# NOTES:
+#   - Uses Brave Search API
+#   - Reddit native scraping is handled separately in cell_16
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-"""
-Brave Forum Search Collector
-==============================
-Uses Brave Search API to find patient discussions on Quora,
-health forums, and review sites.
-
-Reads  : Keyword_n8n → "keyword" tab
-Writes : Keyword_n8n → "Google_Forum_Insights" tab
-
-Setup:
-  1. Get a Brave Search API key: https://api-dashboard.search.brave.com/register
-  2. Choose the "Data for Search" plan (free — 2,000 queries/month)
-  3. Set your API key below or as environment variable BRAVE_API_KEY
-
-NOTE: If you don't have a Brave key yet, skip this cell — Reddit insights
-alone (Cell above) are sufficient for the content pipeline.
-"""
+import os
+import time
 
 import requests
-import json
-import time
-import os
-import gspread
-# ─── PATCHED v16.1: Brave key from config ────
-from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
-# ─────────────────────────────────────────────
 
-from app.utils.helper import get_sheet_client
+from app.repositories.run_repo import get_run_keywords
+from app.repositories.search_repo import insert_forum_search_result
+from config import BRAVE_API_KEY
+
 # ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME        = SPREADSHEET_NAME
-INPUT_TAB         = "keyword"
-OUTPUT_TAB        = "Google_Forum_Insights"
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
 MAX_CELL = 49000
 
 # ── Auth ──────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 
 class BraveForumSearchCollector:
     """Collects patient discussions from Quora, forums, and review sites via Brave Search API."""
@@ -181,37 +166,10 @@ class BraveForumSearchCollector:
             "results": all_results,
         }
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(4 * (attempt + 1))
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60}
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=1000, cols=6):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-    return ws
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN EXECUTION
@@ -226,24 +184,27 @@ else:
     print("🔍 BRAVE FORUM SEARCH COLLECTOR")
     print("="*65)
 
-    sp = gc.open(SHEET_NAME)
-    ws_kw = sp.worksheet(INPUT_TAB)
-    records = ws_kw.get_all_records()
+
+    run_id_raw = os.environ.get("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    run_id = int(run_id_raw)
+    records = get_run_keywords(run_id)
 
     collector = BraveForumSearchCollector(
         api_key=BRAVE_API_KEY,
     )
 
-    out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=1000, cols=6)
-    HEADERS = ["Keyword", "Source_Type", "Title", "Snippet", "URL", "Display_Link"]
-    rows_out = [HEADERS]
+
+    print(f"\n💾 Saving forum search results to DB...")
 
     for row in records:
-        keyword = str(row.get("Keyword", "")).strip()
+        keyword = str(row.get("keyword", "")).strip()
         if not keyword:
             continue
 
         print(f"\n  Keyword: '{keyword}'")
+
         results = collector.collect_from_sources(
             keyword=keyword,
             sources=["quora", "forums", "reviews"],
@@ -251,18 +212,16 @@ else:
         )
 
         for r in results["results"]:
-            rows_out.append([
-                keyword,
-                r["source_type"],
-                _trunc(r["title"]),
-                _trunc(r["snippet"]),
-                r["url"],
-                r["source"],
-            ])
-
-    _write_with_retry(out_ws, rows_out)
-    _fmt_header(out_ws, len(HEADERS))
+            insert_forum_search_result(
+                run_id=run_id,
+                keyword=keyword,
+                source_type=r["source_type"],
+                title=_trunc(r["title"]),
+                snippet=_trunc(r["snippet"]),
+                url=r["url"],
+                display_link=r["source"],
+            )
 
     print(f"\n{'='*65}")
-    print(f"✅ BRAVE FORUM SEARCH COMPLETE — {len(rows_out)-1} results in '{OUTPUT_TAB}'")
+    print(f"✅ BRAVE FORUM SEARCH COMPLETE")
     print(f"{'='*65}")

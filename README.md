@@ -257,7 +257,7 @@ Your web service already runs from the repo. Now add a separate worker:
 
 Railway dashboard → "+ New" → "Empty Service" → "Deploy from GitHub" →
 same repo. Then in the service settings:
-- **Custom start command:** `python -m app.queue`
+- **Custom start command:** `python -m app.job_queue`
 - All env vars (below) copied from the web service
 
 ### Step 5 — Set env vars (both services)

@@ -1,71 +1,54 @@
-# ─── NOTE: This cell now imports keys from config.py ────────
-# If you haven't set up config.py yet, see README_REVISION.md
-try:
-    from config import (SERP_API_KEY, GEMINI_API_KEY,
-                         FIRECRAWL_API_KEY, BRAVE_API_KEY,
-                         SPREADSHEET_NAME,
-                         GEMINI_MODEL, COUNTRY_MAP, SAFETY_OFF, SCOPES)
-except ImportError:
-    print('⚠️ config.py not found — falling back to globals from Cell 1')
-# ────────────────────────────────────────────────────────────
-
-
-from stages.cells.cell_23_shared_utils import *
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ─── CELL: H2/H3 Strategic Outline + Content Gap Analysis ────────────
-# SINGLE-ARTICLE PARADIGM:
-#   Merges ALL PAA, Autocomplete, Related Searches across all keywords
-#   into ONE unified blog outline for the single article.
+# ─────────────────────────────────────────────────────────────
+# BLOG OUTLINE GENERATOR
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates a strategic H2/H3 blog outline using Gemini,
+#   combining SERP data, competitor structure, and forum insights.
 #
-# Reads  : Keyword_n8n > H1_Meta_Output tab      (primary keyword, countries, chosen H1)
-#         : Keyword_n8n > keyword tab             (fallback for keyword list)
-#         : Keyword_n8n > Url_data_ext tab        (all competitor H2/H3 structures)
-#         : Keyword_n8n > PAA tab                 (ALL PAA questions across all keywords)
-#         : Keyword_n8n > Other_Autocomplete tab  (ALL autocomplete across all keywords)
-#         : Keyword_n8n > Related_search tab      (ALL related searches)
-#         : Keyword_n8n > Forum_Master_Insights   (NEW: Content_Gap + Objection + Patient_Question)
-#         : Keyword_n8n > Forum_Master_MD         (NEW: patient voice + emotion vocabulary)
-# Writes : Keyword_n8n > Blog_Outline tab         (ONE row — the single article outline)
-# ─────────────────────────────────────────────────────────────────────
+# INPUT:
+#   - H1/meta output (R2 + Postgres)
+#   - competitor_pages (H2/H3 + FAQs)
+#   - paa_questions
+#   - search_suggestions (autocomplete + related)
+#   - forum_master_insights
+#
+# PROCESS:
+#   - Loads unified article brief
+#   - Aggregates SERP + forum intelligence
+#   - Builds structured prompt with caps
+#   - Generates outline via Gemini
+#   - Parses structured sections
+#
+# OUTPUT:
+#   - Markdown outline → R2 (blog/{run_id}/outline.md)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Single-article paradigm (all keywords merged)
+#   - Includes gap analysis + SEO tagging
+#   - Critical for downstream blog generation
+# ─────────────────────────────────────────────────────────────
 
-import json, time, re
-import gspread
+import json
+import os
+import re
+import time
+
+from psycopg2.extras import Json
 from google import genai
 from google.genai import types
-from app.utils.helper import get_sheet_client
+
+from app.database import fetch_all, fetch_one, execute
+from app.repositories.run_repo import get_run_keywords
+from app.storage import r2_get_text, r2_put_text
+
+from stages.cells.cell_23_shared_utils import *
+from config import GEMINI_API_KEY, GEMINI_MODEL, SAFETY_OFF
 
 # ── Config ────────────────────────────────────────────────────────────
-SHEET_NAME       = SPREADSHEET_NAME
-H1_META_TAB      = "H1_Meta_Output"
-KEYWORD_TAB      = "keyword"
-URL_DATA_TAB     = "Url_data_ext"
-PAA_TAB          = "PAA"
-AUTOCOMPLETE_TAB = "Other_Autocomplete"
-RELATED_TAB           = "Related_search"
-FORUM_INSIGHTS_TAB    = "Forum_Master_Insights"
-FORUM_MD_TAB          = "Forum_Master_MD"
-OUTPUT_TAB            = "Blog_Outline"
-
 
 GEMINI_MODEL      = "gemini-2.5-flash"
 MAX_CELL          = 49000
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
 COUNTRY_MAP = {
     "ng": "Nigeria", "ae": "UAE", "gb": "UK", "us": "USA",
@@ -77,7 +60,6 @@ COUNTRY_MAP = {
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SAFETY_OFF = [
@@ -160,53 +142,13 @@ def parse_outline_sections(raw_text):
     }
 
 
-# ── Sheet helpers ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
 
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            wait = 4 * (attempt + 1)
-            if attempt < retries - 1:
-                time.sleep(wait)
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60}
-    })
-
-def get_or_create_tab(spreadsheet, tab_name, rows=200, cols=10):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
-
-# ── FIX 1 + FIX 2: increased max_tokens default + use resp.text ───────
-# FIX 1: max_tokens raised from 6000 → 16000
-#   gemini-2.5-flash thinking mode consumes tokens from the same
-#   max_output_tokens budget. With 6000, ~5500 tokens go to internal
-#   thinking, leaving ~500 for actual output — outline cuts off at H2 #5.
-#   16000 gives enough headroom for thinking + a full outline.
-#
-# FIX 2: resp.text instead of resp.candidates[0].content.parts[0].text
-#   gemini-2.5-flash can return thinking as parts[0] (thought=True).
-#   Accessing parts[0].text directly returns the thinking block, not the
-#   actual outline. resp.text skips thinking parts and returns only the
-#   real response, correctly concatenated.
+# ── Gemini call handling (token + response fixes)
+# ── Prompt size control (caps applied)
 def call_gemini(prompt, max_tokens=16000):   # ← FIX 1: was 6000
     for attempt in range(3):
         try:
@@ -228,13 +170,16 @@ def call_gemini(prompt, max_tokens=16000):   # ← FIX 1: was 6000
 
 
 # ═══════════════════════════════════════════════════════════════
-# DATA LOADERS — all load EVERYTHING (no per-keyword filtering)
+# DATA LOADERS — DB + R2
 # ═══════════════════════════════════════════════════════════════
 
+def current_run_id() -> int:
+    run_id_raw = os.getenv("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    return int(run_id_raw)
 
-# ── FIX #6: extract_best_h1 was called but never defined in this cell ─
-# It existed only in Cell 21 (shared_utils). If Cell 21 wasn't run first,
-# this cell crashed with NameError. Now defined inline as safety net.
+
 def extract_best_h1(h1_options_text, recommended_text, fallback_keyword):
     """Extract the best H1 from parsed sections, with multiple fallbacks."""
     if recommended_text:
@@ -243,48 +188,86 @@ def extract_best_h1(h1_options_text, recommended_text, fallback_keyword):
             h1 = match.group(1).strip().strip('"').strip("'").strip("*")
             if len(h1) > 10:
                 return h1
+
     if h1_options_text:
         match = re.search(r'^\s*1[\.\)]\s*(.+?)(?:\s*—|\s*$)', h1_options_text, re.MULTILINE)
         if match:
             h1 = match.group(1).strip().strip('"').strip("'").strip("*")
             if len(h1) > 10:
                 return h1
+
     return fallback_keyword
 
-def load_article_brief(sp):
-    """Load the single-article brief from H1_Meta_Output (produced by previous cell)."""
-    try:
-        ws = sp.worksheet(H1_META_TAB)
-        records = ws.get_all_records()
-        if records:
-            r = records[0]
-            primary = str(r.get("Primary_Keyword", "")).strip()
-            secondary = str(r.get("Secondary_Keywords", "")).strip()
-            countries = str(r.get("Target_Countries", "")).strip()
 
-            chosen_h1 = extract_best_h1(
-                str(r.get("H1_Options", "")),
-                str(r.get("Recommended_Combination", "")),
-                primary
-            )
+def _extract_section(text: str, heading: str) -> str:
+    pattern = rf"## {re.escape(heading)}\n(.*?)(?=\n## |\Z)"
+    match = re.search(pattern, text or "", re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
 
-            return {
-                "primary_keyword": primary,
-                "secondary_keywords": [k.strip() for k in secondary.split(",") if k.strip()],
-                "all_keywords": [primary] + [k.strip() for k in secondary.split(",") if k.strip()],
-                "target_countries": countries,
-                "chosen_h1": chosen_h1,
-            }
-    except Exception as e:
-        print(f"  ⚠️ Could not load H1_Meta_Output: {e}")
 
-    print(f"  ⚠️ Falling back to keyword tab...")
-    ws = sp.worksheet(KEYWORD_TAB)
-    records = ws.get_all_records()
-    kws = list(dict.fromkeys(str(r.get("Keyword", "")).strip() for r in records if str(r.get("Keyword", "")).strip()))
-    ccs = list(set(str(r.get("Country_Code", "")).strip().lower() for r in records if str(r.get("Country_Code", "")).strip()))
-    countries = ", ".join(COUNTRY_MAP.get(c, c.upper()) for c in sorted(ccs))
+def load_article_brief(run_id: int):
+    """Load article brief from H1/meta output in R2; fallback to run_keywords."""
+    output = fetch_one(
+        """
+        SELECT r2_key, metadata_json
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "h1_meta"),
+    )
+
+    if output:
+        text = r2_get_text(output["r2_key"])
+        metadata = output.get("metadata_json") or {}
+
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+
+        primary = str(metadata.get("primary_keyword", "")).strip()
+        secondary = metadata.get("secondary_keywords", []) or []
+        countries = metadata.get("target_countries", []) or []
+
+        h1_options = _extract_section(text, "H1 Options")
+        recommended = _extract_section(text, "Recommended Combination")
+
+        chosen_h1 = extract_best_h1(
+            h1_options,
+            recommended,
+            primary,
+        )
+
+        return {
+            "primary_keyword": primary,
+            "secondary_keywords": secondary,
+            "all_keywords": [primary] + [k for k in secondary if k],
+            "target_countries": ", ".join(countries),
+            "chosen_h1": chosen_h1,
+        }
+
+    print("  ⚠️ H1/meta output not found in generated_outputs. Falling back to run_keywords...")
+
+    records = get_run_keywords(run_id)
+    kws = []
+    country_codes = set()
+
+    for r in records:
+        kw = str(r.get("keyword", "")).strip()
+        cc = str(r.get("country_code", "")).strip().lower()
+
+        if kw and kw not in kws:
+            kws.append(kw)
+        if cc:
+            country_codes.add(cc)
+
     primary = sorted(kws, key=lambda k: len(k.split()), reverse=True)[0] if kws else ""
+    countries = ", ".join(COUNTRY_MAP.get(c, c.upper()) for c in sorted(country_codes))
+
     return {
         "primary_keyword": primary,
         "secondary_keywords": [k for k in kws if k != primary],
@@ -294,123 +277,233 @@ def load_article_brief(sp):
     }
 
 
-def load_all_competitor_h2s(sp):
-    """Load ALL competitor H2/H3 structures."""
-    try:
-        ws = sp.worksheet(URL_DATA_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_all_competitor_h2s(run_id: int):
+    """Load competitor H2/H3 structures from competitor_pages."""
+    records = fetch_all(
+        """
+        SELECT url, h2_data, h3_data
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
     competitors = []
+
     for r in records:
-        url = str(r.get("URL", "")).strip()
-        h2_raw = str(r.get("H2_Data", "")).strip()
-        h3_raw = str(r.get("H3_Data", "")).strip()
+        url = str(r.get("url", "") or "").strip()
+        h2_raw = str(r.get("h2_data", "") or "").strip()
+        h3_raw = str(r.get("h3_data", "") or "").strip()
+
         if h2_raw and h2_raw != "nan":
-            h2s = [re.sub(r'^\d+\.\s*', '', l).strip() for l in h2_raw.split("\n") if l.strip() and len(l.strip()) > 3]
-            h3s = [re.sub(r'^\d+\.\s*', '', l).strip() for l in h3_raw.split("\n") if l.strip() and len(l.strip()) > 3]
-            competitors.append({"url": url, "h2s": h2s, "h3s": h3s})
+            h2s = [
+                re.sub(r'^\d+\.\s*', '', line).strip()
+                for line in h2_raw.split("\n")
+                if line.strip() and len(line.strip()) > 3
+            ]
+            h3s = [
+                re.sub(r'^\d+\.\s*', '', line).strip()
+                for line in h3_raw.split("\n")
+                if line.strip() and len(line.strip()) > 3
+            ]
+
+            competitors.append({
+                "url": url,
+                "h2s": h2s,
+                "h3s": h3s,
+            })
+
     return competitors
 
 
-def load_competitor_faqs(sp):
-    """Load FAQ questions from competitor pages (Url_data_ext → FAQs column)."""
-    try:
-        ws = sp.worksheet(URL_DATA_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        return []
-    seen = set()
+def _extract_questions_from_faq_value(faq_value):
     questions = []
-    for r in records:
-        faq_raw = str(r.get("FAQs", "")).strip()
-        if not faq_raw or faq_raw == "nan":
-            continue
-        for m in re.finditer(r'Q\d+\s*:\s*(.+?)(?:\nA\d+\s*:|$)', faq_raw, re.DOTALL):
+    seen = set()
+
+    if not faq_value:
+        return questions
+
+    if isinstance(faq_value, str):
+        try:
+            parsed = json.loads(faq_value)
+        except Exception:
+            parsed = faq_value
+    else:
+        parsed = faq_value
+
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                q = str(item.get("question", "") or item.get("Question", "") or "").strip()
+                if q and len(q) > 10 and q.lower() not in seen:
+                    questions.append(q)
+                    seen.add(q.lower())
+            elif isinstance(item, str):
+                q = item.strip()
+                if q and len(q) > 10 and q.lower() not in seen:
+                    questions.append(q)
+                    seen.add(q.lower())
+
+    elif isinstance(parsed, dict):
+        for item in parsed.values():
+            if isinstance(item, dict):
+                q = str(item.get("question", "") or item.get("Question", "") or "").strip()
+            else:
+                q = str(item or "").strip()
+
+            if q and len(q) > 10 and q.lower() not in seen:
+                questions.append(q)
+                seen.add(q.lower())
+
+    elif isinstance(parsed, str):
+        for m in re.finditer(r'Q\d+\s*:\s*(.+?)(?:\nA\d+\s*:|$)', parsed, re.DOTALL):
             q = m.group(1).strip()
             if q and len(q) > 10 and q.lower() not in seen:
                 questions.append(q)
                 seen.add(q.lower())
-        for m in re.finditer(r'"question"\s*:\s*"([^"]+)"', faq_raw, re.IGNORECASE):
+
+        for m in re.finditer(r'"question"\s*:\s*"([^"]+)"', parsed, re.IGNORECASE):
             q = m.group(1).strip()
             if q and len(q) > 10 and q.lower() not in seen:
                 questions.append(q)
                 seen.add(q.lower())
+
     return questions
 
 
-def load_all_deduplicated(sp, tab_name, col_name):
-    """Load all values from a tab column, deduplicated."""
-    try:
-        ws = sp.worksheet(tab_name)
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_competitor_faqs(run_id: int):
+    """Load competitor FAQ questions from competitor_pages.faqs_json."""
+    records = fetch_all(
+        """
+        SELECT faqs_json
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
     seen = set()
-    items = []
+    questions = []
+
     for r in records:
-        val = ""
-        for key in [col_name, col_name.lower(), col_name.replace("_", " ")]:
-            val = str(r.get(key, "")).strip()
-            if val and val != "nan":
-                break
-        if val and val != "nan" and val.lower() not in seen:
-            items.append(val)
-            seen.add(val.lower())
-    return items
+        for q in _extract_questions_from_faq_value(r.get("faqs_json")):
+            if q.lower() not in seen:
+                questions.append(q)
+                seen.add(q.lower())
+
+    return questions
 
 
-def load_autocomplete_suggestions(sp, tab_name):
-    """Load pipe-separated autocomplete suggestions from Other_Autocomplete tab."""
-    try:
-        ws = sp.worksheet(tab_name)
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_paa_questions(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT question
+        FROM paa_questions
+        WHERE run_id = %s
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
     seen = set()
-    items = []
-    for r in records:
-        raw = str(r.get("Suggestions", r.get("suggestions", r.get("Suggestion", "")))).strip()
-        if not raw or raw == "nan":
-            continue
-        for suggestion in raw.split("|"):
-            s = suggestion.strip()
-            if s and len(s) > 3 and s.lower() not in seen:
-                items.append(s)
-                seen.add(s.lower())
-    return items
+    out = []
+
+    for r in rows:
+        q = str(r.get("question", "") or "").strip()
+        if q and q.lower() not in seen:
+            out.append(q)
+            seen.add(q.lower())
+
+    return out
 
 
-def load_forum_insights_for_outline(sp):
+def load_autocomplete_suggestions(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT suggestion
+        FROM search_suggestions
+        WHERE run_id = %s
+          AND source = 'autocomplete'
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
+    seen = set()
+    out = []
+
+    for r in rows:
+        s = str(r.get("suggestion", "") or "").strip()
+        if s and len(s) > 3 and s.lower() not in seen:
+            out.append(s)
+            seen.add(s.lower())
+
+    return out
+
+
+def load_related_searches(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT suggestion
+        FROM search_suggestions
+        WHERE run_id = %s
+          AND source = 'related'
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
+    seen = set()
+    out = []
+
+    for r in rows:
+        s = str(r.get("suggestion", "") or "").strip()
+        if s and s.lower() not in seen:
+            out.append(s)
+            seen.add(s.lower())
+
+    return out
+
+
+def load_forum_insights_for_outline(run_id: int):
     """
-    Load Content_Gap, Objection, Patient_Question rows from Forum_Master_Insights.
+    Load Content_Gap, Objection, Patient_Question rows from forum_master_insights.
     These are injected into the outline prompt as high-priority H2 candidates.
     """
-    try:
-        ws      = sp.worksheet(FORUM_INSIGHTS_TAB)
-        records = ws.get_all_records()
-    except Exception:
-        print(f"  ⚠️  Forum_Master_Insights not found — run Cells A+B first")
-        return ""
+    records = fetch_all(
+        """
+        SELECT insight_type, priority_score, clean_insight, insight_text, detected_country
+        FROM forum_master_insights
+        WHERE run_id = %s
+          AND insight_type IN ('Content_Gap', 'Objection', 'Patient_Question')
+        ORDER BY priority_score DESC
+        """,
+        (run_id,),
+    )
 
-    outline_cats = {"Content_Gap", "Objection", "Patient_Question"}
-    grouped = {"Content_Gap": [], "Objection": [], "Patient_Question": []}
+    grouped = {
+        "Content_Gap": [],
+        "Objection": [],
+        "Patient_Question": [],
+    }
+
     for r in records:
-        cat = str(r.get("Insight_Type", "")).strip()
-        if cat in outline_cats:
-            score   = int(r.get("Priority_Score", 1) or 1)
-            insight = str(r.get("Clean_Insight", r.get("Insight_Text", ""))[:120]).strip()
-            country = str(r.get("Detected_Country", "Global")).strip()
-            if insight:
-                grouped[cat].append((score, insight, country))
+        cat = str(r.get("insight_type", "") or "").strip()
+        score = int(r.get("priority_score") or 1)
+        insight = str(r.get("clean_insight", "") or r.get("insight_text", "") or "").strip()
+        country = str(r.get("detected_country", "Global") or "Global").strip()
 
-    for cat in grouped:
-        grouped[cat].sort(key=lambda x: x[0], reverse=True)
+        if cat in grouped and insight:
+            grouped[cat].append((score, insight[:120], country))
 
     if not any(grouped.values()):
         return ""
 
-    lines = ["\nFORUM MASTER INSIGHTS (for outline — run Cells A+B to generate):"]
+    lines = ["\nFORUM MASTER INSIGHTS (for outline):"]
 
     if grouped["Content_Gap"]:
         lines.append("\nCONTENT GAPS (topics NO competitor covers — highest SEO priority):")
@@ -428,6 +521,38 @@ def load_forum_insights_for_outline(sp):
             lines.append(f"  [P{score}|{country}] {insight}")
 
     return "\n".join(lines)
+
+
+def save_blog_outline_output(run_id: int, output_text: str, metadata: dict) -> str:
+    r2_key = f"blog/{run_id}/outline.md"
+
+    r2_put_text(r2_key, output_text)
+
+    execute(
+        """
+        DELETE FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        """,
+        (run_id, "blog_outline"),
+    )
+
+    execute(
+        """
+        INSERT INTO generated_outputs (
+            run_id, output_type, r2_key, metadata_json
+        )
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            run_id,
+            "blog_outline",
+            r2_key,
+            Json(metadata),
+        ),
+    )
+
+    return r2_key
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -572,10 +697,10 @@ print("🗂️  H2/H3 STRATEGIC OUTLINE + CONTENT GAP ANALYSIS")
 print("   Mode: SINGLE ARTICLE — all keywords/data merged")
 print("="*65)
 
-sp = gc.open(SHEET_NAME)
+run_id = current_run_id()
 
-print(f"\n📋 Loading article brief...")
-brief = load_article_brief(sp)
+print("\n📋 Loading article brief...")
+brief = load_article_brief(run_id)
 
 if not brief or not brief["primary_keyword"]:
     print("❌ No article brief found. Run the H1/Meta cell first.")
@@ -585,65 +710,91 @@ else:
     print(f"  🌍 Countries: {brief['target_countries']}")
     print(f"  🏷️ Chosen H1: {brief['chosen_h1'][:70]}")
 
-    print(f"\n📊 Loading ALL supporting data (merged)...")
-    competitor_h2s = load_all_competitor_h2s(sp)
-    paa_all        = load_all_deduplicated(sp, PAA_TAB, "Question")
-    ac_all         = load_autocomplete_suggestions(sp, AUTOCOMPLETE_TAB)
-    rs_all         = load_all_deduplicated(sp, RELATED_TAB, "Related_Query")
-    comp_faqs      = load_competitor_faqs(sp)
+    print("\n📊 Loading ALL supporting data from DB/R2...")
+    competitor_h2s = load_all_competitor_h2s(run_id)
+    paa_all = load_paa_questions(run_id)
+    ac_all = load_autocomplete_suggestions(run_id)
+    rs_all = load_related_searches(run_id)
+    comp_faqs = load_competitor_faqs(run_id)
 
-    print(f"  Competitors: {len(competitor_h2s)} | PAA: {len(paa_all)} | AC: {len(ac_all)} | RS: {len(rs_all)} | Comp FAQs: {len(comp_faqs)}")
+    print(
+        f"  Competitors: {len(competitor_h2s)} | "
+        f"PAA: {len(paa_all)} | "
+        f"AC: {len(ac_all)} | "
+        f"RS: {len(rs_all)} | "
+        f"Comp FAQs: {len(comp_faqs)}"
+    )
 
-    print(f"\n📊 Loading Forum_Master_Insights for outline...")
-    forum_insights = load_forum_insights_for_outline(sp)
-    print(f"  Forum insights: {'✅ loaded' if forum_insights else '⚠️ not available (run Cells A+B)'}")
+    print("\n📊 Loading Forum_Master_Insights for outline...")
+    forum_insights = load_forum_insights_for_outline(run_id)
+    print(f"  Forum insights: {'✅ loaded' if forum_insights else '⚠️ not available'}")
 
-    # ── FIX 1 applied here too: explicit max_tokens=16000 ─────────────
-    print(f"\n🤖 Generating unified outline...")
-    prompt = build_outline_prompt(brief, competitor_h2s, paa_all, ac_all, rs_all, comp_faqs, forum_insights)
-    result = call_gemini(prompt, max_tokens=16000)   # ← FIX 1: was 6000
+    print("\n🤖 Generating unified outline...")
+    prompt = build_outline_prompt(
+        brief,
+        competitor_h2s,
+        paa_all,
+        ac_all,
+        rs_all,
+        comp_faqs,
+        forum_insights,
+    )
+    result = call_gemini(prompt, max_tokens=16000)
 
     if not result:
         print("  ⚠️ Empty response from Gemini")
     else:
-        parsed       = parse_outline_sections(result)
+        parsed = parse_outline_sections(result)
         gap_analysis = parsed["gap_analysis"]
         outline_text = parsed["outline"]
-        linking      = parsed["linking"]
-        word_count   = parsed["word_count"]
+        linking = parsed["linking"]
+        word_count = parsed["word_count"]
 
         full_outline = outline_text
         if linking:
             full_outline += f"\n\n## Internal Linking Opportunities\n{linking}"
 
-        out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=20, cols=8)
-        HEADERS = [
-            "Primary_Keyword", "Secondary_Keywords", "Target_Countries",
-            "Chosen_H1", "Content_Gap_Analysis", "Complete_Outline",
-            "Word_Count_Recommendation",
-        ]
-        rows_out = [
-            HEADERS,
-            [
-                brief["primary_keyword"],
-                ", ".join(brief["secondary_keywords"]),
-                brief["target_countries"],
-                brief["chosen_h1"],
-                _trunc(gap_analysis),
-                _trunc(full_outline),
-                _trunc(word_count),
-            ],
-        ]
+        output_text = f"""# Blog Outline
 
-        _write_with_retry(out_ws, rows_out)
-        _fmt_header(out_ws, len(HEADERS))
+Primary Keyword: {brief["primary_keyword"]}
+Secondary Keywords: {", ".join(brief["secondary_keywords"])}
+Target Countries: {brief["target_countries"]}
+Chosen H1: {brief["chosen_h1"]}
 
-        h2_count  = len(re.findall(r'^H2:', full_outline, re.MULTILINE))
+## Content Gap Analysis
+
+{gap_analysis}
+
+## Complete Outline
+
+{full_outline}
+
+## Word Count Recommendation
+
+{word_count}
+"""
+
+        metadata = {
+            "primary_keyword": brief["primary_keyword"],
+            "secondary_keywords": brief["secondary_keywords"],
+            "target_countries": brief["target_countries"],
+            "chosen_h1": brief["chosen_h1"],
+            "word_count": word_count,
+        }
+
+        r2_key = save_blog_outline_output(
+            run_id=run_id,
+            output_text=output_text,
+            metadata=metadata,
+        )
+
+        h2_count = len(re.findall(r'^H2:', full_outline, re.MULTILINE))
         faq_count = len(re.findall(r'^\s+Q\d+:', full_outline, re.MULTILINE))
         gap_count = full_outline.count("[GAP]")
+
         print(f"\n  ✅ Outline: {h2_count} H2s | {faq_count} FAQ questions | {gap_count} gap sections")
         print(f"  ✅ Word count: {word_count[:60] if word_count else '⚠️ empty'}")
         print(f"\n{'='*65}")
-        print(f"✅ OUTLINE COMPLETE — single article")
-        print(f"   Output tab: '{OUTPUT_TAB}' in '{SHEET_NAME}'")
+        print("✅ OUTLINE COMPLETE — single article")
+        print(f"   R2 output: {r2_key}")
         print(f"{'='*65}")

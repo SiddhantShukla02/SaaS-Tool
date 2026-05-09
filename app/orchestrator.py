@@ -16,9 +16,9 @@ State transitions enforced here:
 import time
 from datetime import datetime
 from typing import Optional
-
-from app import db
-from app.queue import enqueue
+from app.repositories.run_repo import create_run, insert_run_keywords
+from app.repositories import state_repo as db
+from app.job_queue import enqueue
 
 
 # ─────────────────────────────────────────────────────────────
@@ -26,17 +26,23 @@ from app.queue import enqueue
 # ─────────────────────────────────────────────────────────────
 
 def start_run(keyword: str, countries: list, created_by: str) -> int:
-    """
-    Create a new run and queue Stage 1.
-    Caller's responsibility: ensure the Google Sheet has keyword + country
-    data in the `keyword` tab before calling this.
-    """
-    run_id = db.create_run(keyword, countries, created_by)
+    run_id = create_run(keyword, created_by)
+
+    keyword_rows = [
+        {
+            "keyword": keyword,
+            "country_code": country_code,
+        }
+        for country_code in countries
+    ]
+
+    insert_run_keywords(run_id, keyword_rows)
+
     db.log(run_id, "info", f"Run created by {created_by}")
-    db.log(run_id, "info",
-            f"Make sure the Google Sheet 'keyword' tab has: "
-            f"keyword='{keyword}' and country codes {countries}")
+    db.log(run_id, "info", f"Stored {len(keyword_rows)} keyword/country pairs in DB")
+
     _queue_stage(run_id, "stage_1_serp_paa", db.STATUS_STAGE1_RUNNING)
+
     return run_id
 
 
@@ -54,7 +60,7 @@ def mark_final_url_ready(run_id: int, user: str = "anonymous"):
             f"expected '{db.STATUS_AWAITING_FINAL_URL}'"
         )
     db.log(run_id, "info", f"Final_URL marked ready by {user}")
-    _queue_stage(run_id, "stage_3_blog", db.STATUS_STAGE3_RUNNING)
+    _queue_stage(run_id, "stage_2_context", db.STATUS_STAGE2_RUNNING)
 
 
 def start_question_bank(run_id: int):
@@ -152,19 +158,21 @@ def on_stage_finished(run_id: int, stage_name: str,
 
     # Auto-advance chains
     if stage_name == "stage_1_serp_paa":
-        db.log(run_id, "info", "Auto-queueing Stage 2")
-        _queue_stage(run_id, "stage_2_context", db.STATUS_STAGE2_RUNNING)
-    elif stage_name == "stage_2_context":
         db.update_status(run_id, db.STATUS_AWAITING_FINAL_URL)
-        db.log(run_id, "info",
-                "Stage 2 done — waiting for user to curate Final_URL tab "
-                "and click 'Final_URL ready'")
+        db.log(run_id, "info", "Stage 1 complete — waiting for URL selection")
+
+    elif stage_name == "stage_2_context":
+        db.log(run_id, "info", "Stage 2 complete — starting blog writing")
+        _queue_stage(run_id, "stage_3_blog", db.STATUS_STAGE3_RUNNING)
+
     elif stage_name == "stage_3_blog":
         db.update_status(run_id, db.STATUS_BLOG_READY)
         db.log(run_id, "info", "Blog ready")
+
     elif stage_name == "stage_4_bank":
         db.update_status(run_id, db.STATUS_BANK_READY)
         db.log(run_id, "info", "Question Bank ready")
+
     elif stage_name == "stage_5_drafts":
         db.update_status(run_id, db.STATUS_COMPLETE)
         db.log(run_id, "info", "Run complete")
@@ -235,6 +243,7 @@ def progress_for_run(run_id: int) -> dict:
             "stage_2_context":   ("done",    "failed",  "pending", "pending"),
             "stage_3_blog":      ("done",    "done",    "failed",  "pending"),
             "stage_4_bank":      ("done",    "done",    "done",    "failed"),
+            "stage_5_drafts":    ("done",    "done",    "done",    "done"),
         }.get(stage, ("pending",) * 4)
     else:
         marker = STATE_TO_PROGRESS.get(status, ("pending",) * 4)

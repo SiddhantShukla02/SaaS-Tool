@@ -1,213 +1,77 @@
-# ─── CELL: Enhanced Blog Writer (REVISED) ────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# BLOG WRITER (AEO / GEO / YMYL)
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Generates the final blog article using structured outline,
+#   empathy hooks, forum insights, and keyword intelligence.
 #
-# CHANGES FROM V15:
-#   1. AEO/GEO rules baked into section prompt:
-#      - Answer-first paragraphs (first 2 sentences answer the H2 directly)
-#      - Entity-explicit naming (no "our partner hospital")
-#      - Statistical density target (≥ 5 stats per 1000 words)
-#      - "X is Y" definitions for first mention of medical entities
-#      - Passage self-containment (no "as discussed above")
-#      - Comparison tables, not prose, for any comparison
-#      - Speakable-sentence flagging for dev team
+# INPUT:
+#   - blog_outline (R2 + Postgres)
+#   - empathy_faq output
+#   - competitor_keywords (structured keyword clusters)
+#   - forum_master_md (patient insights)
+#   - run_keywords (country + persona context)
 #
-#   2. YMYL guardrails:
-#      - No specific dosages, surgical self-care, diagnostic claims
-#      - Mandatory disclaimer on clinical outcome claims
-#      - Citation requirement for every medical factual claim
-#      - Author byline / medical reviewer placeholder
+# PROCESS:
+#   - Parses outline into structured H2/H3 sections
+#   - Generates each section using Gemini
+#   - Applies:
+#       → AEO rules (answer-first, entity clarity, self-contained sections)
+#       → GEO rules (locale-aware content, currency, trust signals)
+#       → YMYL safeguards (medical safety, disclaimers, citations)
+#       → Persona targeting (country-specific concerns + tone)
+#   - Enforces:
+#       → statistical density
+#       → comparison tables where required
+#       → section-level keyword relevance
+#   - Builds full blog incrementally
+#   - Extracts:
+#       → speakable sentences
+#       → citation candidates
 #
-#   3. Locale-aware framing:
-#      - Pulls persona matrix from config per target country
-#      - Currency, language, trust signals applied throughout
-#      - Country-specific objections addressed
+# OUTPUT:
+#   - Final blog → R2 (blog/{run_id}/final.md)
+#   - Speakables → R2 (outputs/{run_id}/speakable.json)
+#   - Citations → R2 (outputs/{run_id}/citations.json)
+#   - Metadata → Postgres (generated_outputs)
 #
-#   4. Replaces post-hoc banned_phrase dict with positive-example prompting.
-#      The v15 approach of "never use these 30 words" then regex-replacing
-#      is replaced with "here's the voice we want" + 3 positive examples.
-#
-#   5. Reading grade target: Class 8 (was ambiguous).
-#
-#   6. Structured output includes Speakable candidates and citation list
-#      for handoff to dev team and blog-grade-reducer skill.
-#
-# Reads  : Keyword_n8n > Blog_Outline, Empathy_FAQ_Output, H1_Meta_Output,
-#          Keyword_data (JSON), keyword, Forum_Master_MD
-# Writes : Keyword_n8n > Blog_Output, Speakable_Candidates, Citation_List
-#          Google Doc   > Blog_Writeup
-# ─────────────────────────────────────────────────────────────────────
+# NOTES:
+#   - Central content generation stage
+#   - Replaces legacy Sheets/Docs-based blog pipeline
+#   - Uses prompt-driven voice control instead of post-processing bans
+#   - Designed for SEO + AEO + medical compliance
+# ─────────────────────────────────────────────────────────────
 
 import json
-import time
+import os
 import re
-import gspread
+import time
+from datetime import datetime
+
+from psycopg2.extras import Json
 from google import genai
 from google.genai import types
-from googleapiclient.discovery import build
-from app.utils.helper import get_sheet_client, get_google_creds
+
+from app.database import fetch_all, fetch_one, execute
+from app.repositories.run_repo import get_run_keywords
+from app.storage import r2_get_text, r2_put_text
 
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
-    MAX_CELL, MAX_TOKENS, SAFETY_OFF, SCOPES,
+    GEMINI_API_KEY, GEMINI_MODEL,
+    MAX_CELL, MAX_TOKENS, SAFETY_OFF,
     TARGET_WORDS_PER_SECTION, HARD_CAP_WORDS, TARGET_READING_GRADE,
     MIN_STATS_PER_1000, YMYL_DISCLAIMERS,
     get_country_name, get_persona,
 )
 
-
 from stages.cells.cell_23_shared_utils import *
-from config import DOC_OUTPUT_TITLE
 
-
-# ── Config specific to this cell ─────────────────────────────────────
-OUTLINE_TAB         = "Blog_Outline"
-EMPATHY_TAB         = "Empathy_FAQ_Output"
-H1_META_TAB         = "H1_Meta_Output"
-KEYWORD_TAB         = "keyword"
-KW_DATA_TAB         = "Keyword_data"
-FORUM_MD_TAB        = "Forum_Master_MD"
-OUTPUT_TAB          = "Blog_Output"
-SPEAKABLE_TAB       = "Speakable_Candidates"
-CITATIONS_TAB       = "Citation_List"
-DOC_TITLE           = DOC_OUTPUT_TITLE
 
 # ── Auth ─────────────────────────────────────────────────────────────
-creds = get_google_creds(SCOPES)
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-docs_service  = build("docs", "v1", credentials=creds)
-drive_service = build("drive", "v3", credentials=creds)
 
 
 
-def get_or_create_tab(spreadsheet, tab_name, rows=3000, cols=20):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-        print(f"  📋 Tab '{tab_name}' cleared and ready.")
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-        print(f"  📋 Tab '{tab_name}' created.")
-    return ws
-
-# ════════════════════════════════════════════════════════════════════
-# GOOGLE DOC HELPERS
-# ════════════════════════════════════════════════════════════════════
-
-def _get_or_create_doc(title):
-    res = drive_service.files().list(
-        q=f"name='{title}' and mimeType='application/vnd.google-apps.document' and trashed=false",
-        fields="files(id,name)"
-    ).execute()
-    files = res.get("files", [])
-    if files:
-        doc_id = files[0]["id"]
-        print(f"  📄 Doc found     : '{title}'  ID: {doc_id}")
-        return doc_id
-    doc    = docs_service.documents().create(body={"title": title}).execute()
-    doc_id = doc["documentId"]
-    drive_service.permissions().create(
-        fileId=doc_id, body={"type": "anyone", "role": "writer"}
-    ).execute()
-    print(f"  📄 Doc created   : '{title}'  ID: {doc_id}")
-    return doc_id
-
-def _clear_doc(doc_id):
-    doc          = docs_service.documents().get(documentId=doc_id).execute()
-    body_content = doc.get("body", {}).get("content", [])
-    if len(body_content) <= 1:
-        return
-    end_index = body_content[-1].get("endIndex", 1) - 1
-    if end_index > 1:
-        docs_service.documents().batchUpdate(
-            documentId=doc_id,
-            body={"requests": [{"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_index}}}]}
-        ).execute()
-        print(f"  🗑️  Doc cleared")
-
-def _batch_update(doc_id, requests):
-    for i in range(0, len(requests), 50):
-        docs_service.documents().batchUpdate(
-            documentId=doc_id, body={"requests": requests[i:i+50]}
-        ).execute()
-        time.sleep(0.3)
-
-def write_markdown_to_doc(doc_id, markdown_text, doc_title):
-    print(f"\n  📝 Writing blog to Google Doc '{doc_title}'...")
-    _clear_doc(doc_id)
-
-    lines    = markdown_text.splitlines()
-    segments = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            segments.append({"type": "blank", "text": "\n"})
-        elif stripped.startswith("### "):
-            segments.append({"type": "h3", "text": stripped[4:].strip()})
-        elif stripped.startswith("## "):
-            segments.append({"type": "h2", "text": stripped[3:].strip()})
-        elif stripped.startswith("# "):
-            segments.append({"type": "h1", "text": stripped[2:].strip()})
-        else:
-            segments.append({"type": "p",  "text": stripped})
-
-    while segments and segments[0]["type"]  == "blank": segments.pop(0)
-    while segments and segments[-1]["type"] == "blank": segments.pop()
-
-    STYLE_MAP = {"h1": "TITLE", "h2": "HEADING_1", "h3": "HEADING_2", "p": "NORMAL_TEXT"}
-    requests  = []
-    cur_idx   = 1
-
-    for seg in segments:
-        seg_type = seg["type"]
-        raw_text = seg["text"]
-
-        if seg_type == "blank":
-            requests.append({"insertText": {"location": {"index": cur_idx}, "text": "\n"}})
-            cur_idx += 1
-            continue
-
-        bold_pattern = re.compile(r"\*\*(.+?)\*\*")
-        parts, last_end = [], 0
-        for m in bold_pattern.finditer(raw_text):
-            if m.start() > last_end:
-                parts.append({"text": raw_text[last_end:m.start()], "bold": False})
-            parts.append({"text": m.group(1), "bold": True})
-            last_end = m.end()
-        if last_end < len(raw_text):
-            parts.append({"text": raw_text[last_end:], "bold": False})
-        if not parts:
-            parts = [{"text": raw_text, "bold": False}]
-
-        parts[-1]["text"] += "\n"
-        para_start = cur_idx
-
-        for part in parts:
-            if not part["text"]: continue
-            requests.append({"insertText": {"location": {"index": cur_idx}, "text": part["text"]}})
-            text_len = len(part["text"])
-            if part["bold"]:
-                requests.append({"updateTextStyle": {
-                    "range": {"startIndex": cur_idx, "endIndex": cur_idx + text_len},
-                    "textStyle": {"bold": True}, "fields": "bold"
-                }})
-            cur_idx += text_len
-
-        named_style = STYLE_MAP.get(seg_type, "NORMAL_TEXT")
-        requests.append({"updateParagraphStyle": {
-            "range": {"startIndex": para_start, "endIndex": cur_idx},
-            "paragraphStyle": {"namedStyleType": named_style},
-            "fields": "namedStyleType"
-        }})
-
-    if requests:
-        _batch_update(doc_id, requests)
-        print(f"  ✅ Doc written   : {len(segments)} segments → {cur_idx} chars inserted")
-    else:
-        print(f"  ⚠️  No content to write to Doc")
-
-    doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
-    print(f"  🔗 {doc_url}")
-    return doc_url
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -242,109 +106,170 @@ def count_words(text: str) -> int:
 # Data loaders
 # ═══════════════════════════════════════════════════════════════════
 
-def load_blog_plan(sp):
+def _extract_markdown_section(text: str, heading: str) -> str:
+    pattern = rf"## {re.escape(heading)}\n(.*?)(?=\n## |\Z)"
+    match = re.search(pattern, text or "", re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+def load_blog_plan(run_id: int):
     """
-    Load all data needed for blog generation.
-    Returns dict with outline, hooks, FAQ answers, keywords, forum data,
-    and the target country personas assembled from config.
+    Load all data needed for blog generation from Postgres + R2.
     """
     plan = {
-        "chosen_h1": "", "primary_keyword": "", "target_countries": "",
-        "target_country_codes": [], "outline": "",
-        "empathy_hooks": "", "faq_answers": "",
-        "keyword_pool": [], "keyword_by_category": {},
-        "forum_data": "", "personas": [],
+        "chosen_h1": "",
+        "primary_keyword": "",
+        "target_countries": "",
+        "target_country_codes": [],
+        "outline": "",
+        "empathy_hooks": "",
+        "faq_answers": "",
+        "keyword_pool": [],
+        "keyword_by_category": {},
+        "forum_data": "",
+        "personas": [],
     }
 
-    # H1 + Meta
-    try:
-        ws = sp.worksheet(H1_META_TAB)
-        recs = ws.get_all_records()
-        if recs:
-            plan["chosen_h1"] = str(recs[0].get("Chosen_H1", "")).strip()
-    except Exception:
-        pass
+    # H1/meta output
+    h1_row = fetch_one(
+        """
+        SELECT r2_key, metadata_json
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "h1_meta"),
+    )
 
-    # Outline
-    try:
-        ws = sp.worksheet(OUTLINE_TAB)
-        recs = ws.get_all_records()
-        if recs:
-            row = recs[0]
-            plan["primary_keyword"] = str(row.get("Primary_Keyword", "")).strip()
-            plan["target_countries"] = str(row.get("Target_Countries", "")).strip()
-            plan["outline"] = str(row.get("Complete_Outline", "")).strip()
-            if not plan["chosen_h1"]:
-                plan["chosen_h1"] = str(row.get("Chosen_H1", "")).strip()
-    except Exception:
-        pass
+    if h1_row:
+        h1_meta = h1_row.get("metadata_json") or {}
+        if isinstance(h1_meta, str):
+            try:
+                h1_meta = json.loads(h1_meta)
+            except Exception:
+                h1_meta = {}
+
+        plan["primary_keyword"] = str(h1_meta.get("primary_keyword", "") or "").strip()
+        plan["target_countries"] = ", ".join(h1_meta.get("target_countries", []) or [])
+        plan["chosen_h1"] = str(h1_meta.get("chosen_h1", "") or "").strip()
+
+    # Outline output
+    outline_row = fetch_one(
+        """
+        SELECT r2_key, metadata_json
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "blog_outline"),
+    )
+
+    if outline_row:
+        outline_text = r2_get_text(outline_row["r2_key"])
+        outline_meta = outline_row.get("metadata_json") or {}
+        if isinstance(outline_meta, str):
+            try:
+                outline_meta = json.loads(outline_meta)
+            except Exception:
+                outline_meta = {}
+
+        plan["outline"] = outline_text or ""
+        plan["primary_keyword"] = plan["primary_keyword"] or str(outline_meta.get("primary_keyword", "") or "").strip()
+        plan["target_countries"] = plan["target_countries"] or str(outline_meta.get("target_countries", "") or "").strip()
+        plan["chosen_h1"] = plan["chosen_h1"] or str(outline_meta.get("chosen_h1", "") or "").strip()
 
     # Country codes + personas
-    try:
-        ws = sp.worksheet(KEYWORD_TAB)
-        recs = ws.get_all_records()
-        codes = list(set(str(r.get("Country_Code", "")).strip().lower()
-                         for r in recs if r.get("Country_Code")))
-        plan["target_country_codes"] = [c for c in codes if c]
-        plan["personas"] = [
-            {"code": c, "name": get_country_name(c), **get_persona(c)}
-            for c in plan["target_country_codes"]
-        ]
-    except Exception:
-        pass
+    keyword_rows = get_run_keywords(run_id)
+    codes = sorted({
+        str(r.get("country_code", "") or "").strip().lower()
+        for r in keyword_rows
+        if str(r.get("country_code", "") or "").strip()
+    })
 
-    # Empathy hooks + FAQ
-    try:
-        ws = sp.worksheet(EMPATHY_TAB)
-        recs = ws.get_all_records()
-        if recs:
-            plan["empathy_hooks"] = str(recs[0].get("Empathy_Hooks", "")).strip()
-            plan["faq_answers"] = str(recs[0].get("FAQ_Answers", "")).strip()
-    except Exception:
-        pass
+    plan["target_country_codes"] = codes
+    plan["personas"] = [
+        {"code": c, "name": get_country_name(c), **get_persona(c)}
+        for c in codes
+    ]
 
-    # Keywords (structured JSON from revised Cell 14)
-    try:
-        ws = sp.worksheet(KW_DATA_TAB)
-        recs = ws.get_all_records()
-        all_kws = set()
-        by_cat = {"procedure_types": set(), "patient_concerns": set(),
-                  "safety_quality": set(), "recovery_results": set(),
-                  "travel_logistics": set(), "cost_value": set(),
-                  "hospital_surgeon_brand": set()}
-        for r in recs:
-            json_text = str(r.get("Extracted_JSON", "")).strip()
-            if not json_text or json_text.startswith("("):
-                continue
+    # Empathy hooks + FAQ output
+    empathy_row = fetch_one(
+        """
+        SELECT r2_key
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "empathy_faq"),
+    )
+
+    if empathy_row:
+        empathy_text = r2_get_text(empathy_row["r2_key"])
+        plan["empathy_hooks"] = _extract_markdown_section(empathy_text, "Empathy Hooks")
+        plan["faq_answers"] = _extract_markdown_section(empathy_text, "FAQ Answers")
+
+    # Keywords from competitor_keywords
+    keyword_data_rows = fetch_all(
+        """
+        SELECT extracted_json
+        FROM competitor_keywords
+        WHERE run_id = %s
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
+    all_kws = set()
+    by_cat = {
+        "procedure_types": set(),
+        "patient_concerns": set(),
+        "safety_quality": set(),
+        "recovery_results": set(),
+        "travel_logistics": set(),
+        "cost_value": set(),
+        "hospital_surgeon_brand": set(),
+    }
+
+    for row in keyword_data_rows:
+        data = row.get("extracted_json") or {}
+        if isinstance(data, str):
             try:
-                data = json.loads(json_text)
-                for cat in by_cat:
-                    for kw in data.get(cat, []):
-                        kw_clean = kw.strip().lower()
-                        if len(kw_clean) > 2:
-                            all_kws.add(kw_clean)
-                            by_cat[cat].add(kw_clean)
-            except json.JSONDecodeError:
-                continue
-        plan["keyword_pool"] = sorted(all_kws)
-        plan["keyword_by_category"] = {k: sorted(v) for k, v in by_cat.items()}
-    except Exception as e:
-        print(f"  ⚠️ Keyword_data load: {e}")
+                data = json.loads(data)
+            except Exception:
+                data = {}
+
+        for cat in by_cat:
+            for kw in data.get(cat, []) or []:
+                kw_clean = str(kw or "").strip().lower()
+                if len(kw_clean) > 2:
+                    all_kws.add(kw_clean)
+                    by_cat[cat].add(kw_clean)
+
+    plan["keyword_pool"] = sorted(all_kws)
+    plan["keyword_by_category"] = {k: sorted(v) for k, v in by_cat.items()}
 
     # Forum data
-    try:
-        ws = sp.worksheet(FORUM_MD_TAB)
-        recs = ws.get_all_records()
-        for r in recs:
-            cat = str(r.get("Insight_Type", "")).strip()
-            if cat == "ALL_CATEGORIES":
-                plan["forum_data"] = str(r.get("Prompt_Ready_Markdown", "")).strip()
-                break
-    except Exception:
-        pass
+    forum_row = fetch_one(
+        """
+        SELECT r2_key
+        FROM forum_master_md
+        WHERE run_id = %s
+          AND insight_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "ALL_CATEGORIES"),
+    )
+
+    if forum_row:
+        plan["forum_data"] = r2_get_text(forum_row["r2_key"])
 
     return plan
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Voice and persona helpers
@@ -828,8 +753,13 @@ def main():
     print("✍️  BLOG WRITER (REVISED — AEO/GEO/YMYL/Locale)")
     print("="*65)
 
-    sp = gc.open(SPREADSHEET_NAME)
-    plan = load_blog_plan(sp)
+    run_id_raw = os.getenv("RUN_ID")
+    if not run_id_raw:
+        raise RuntimeError("RUN_ID env var is required")
+    run_id = int(run_id_raw)
+
+    plan = load_blog_plan(run_id)
+
 
     if not plan["outline"]:
         print("❌ No outline found. Run upstream cells first.")
@@ -840,21 +770,16 @@ def main():
     print(f"  🎯 Personas : {len(plan['personas'])} loaded")
     print(f"  🔑 Keywords : {len(plan['keyword_pool'])} total ({len(plan['keyword_by_category'])} categories)")
 
-    # NOTE: The full section-by-section loop from v15 Cell 33 lines 789-1151
-    # continues here with the same structure, but each section prompt now uses
-    # the new build_section_prompt() above with all AEO/GEO/YMYL/voice rules.
-    #
-    # After generating all sections, the revised pipeline:
-    #   1. Extracts Speakable candidates → writes to Speakable_Candidates tab
-    #   2. Extracts citations → writes to Citation_List tab (dev team verifies)
+    # After generating all sections, the pipeline:
+    #   1. Extracts Speakable candidates → stored in R2 + Postgres
+    #   2. Extracts citations → stored for downstream validation
     #   3. Strips [SPEAKABLE] tags from the final blog
-    #   4. Writes the cleaned blog to Google Doc (same as v15)
+    #   4. Cleans blog output (removes internal markers)
     #   5. Hands off to the blog-grade-reducer skill for Class 7-8 reduction
-    #
-    # The v15 post-hoc banned_phrase dict and make_unique_hook() are REMOVED.
-    # Those behaviors are now pushed into the section prompt via the voice brief.
 
-# Parse the v15 Cell 27 outline into structured sections
+
+    
+    # Parse the outline into structured sections
     all_sections = parse_v15_outline_to_sections(plan["outline"])
     body_sections, faq_section, conclusion_section = split_sections_by_type(all_sections)
 
@@ -932,46 +857,56 @@ def main():
     print(f"     Speakable candidates: {len(speakables)}")
     print(f"     Citations to verify: {len(citations)}")
 
-    # Write main blog output
-    out_ws = get_or_create_tab(sp, OUTPUT_TAB, rows=20, cols=6)
-    HEADERS = ["H1", "Word_Count", "Primary_Keyword", "Target_Countries", "Full_Blog_Markdown", "Generated_At"]
-    from datetime import datetime
-    rows = [HEADERS, [
-        plan["chosen_h1"], count_words(full_blog), plan["primary_keyword"],
-        plan["target_countries"],
-        full_blog if len(full_blog) <= MAX_CELL else full_blog[:MAX_CELL] + "\n[TRUNCATED]",
-        datetime.now().isoformat(timespec="seconds"),
-    ]]
-    out_ws.update(rows, value_input_option="RAW")
+    
+    # Save blog to R2 + DB
 
-    # Write Speakable candidates for dev team
-    if speakables:
-        sp_ws = get_or_create_tab(sp, SPEAKABLE_TAB, rows=max(len(speakables)+5, 20), cols=3)
-        sp_rows = [["Sentence", "CSS_Class_Suggested", "Word_Count"]]
-        for i, s in enumerate(speakables, 1):
-            sp_rows.append([s, f"speakable-{i}", len(s.split())])
-        sp_ws.update(sp_rows, value_input_option="RAW")
+    blog_r2_key = f"blog/{run_id}/final.md"
+    speakable_r2_key = f"outputs/{run_id}/speakable.json"
+    citations_r2_key = f"outputs/{run_id}/citations.json"
 
-    # Write citations for SEO team verification
-    if citations:
-        cit_ws = get_or_create_tab(sp, CITATIONS_TAB, rows=max(len(citations)+5, 20), cols=3)
-        cit_rows = [["Citation_Text", "Verified_Y_N", "Notes"]]
-        for c in citations:
-            cit_rows.append([c, "", ""])
-        cit_ws.update(cit_rows, value_input_option="RAW")
+    r2_put_text(blog_r2_key, full_blog)
+    r2_put_text(speakable_r2_key, json.dumps(speakables, ensure_ascii=False))
+    r2_put_text(citations_r2_key, json.dumps(citations, ensure_ascii=False))
 
+    # Clean old entries
+    execute(
+        "DELETE FROM generated_outputs WHERE run_id = %s AND output_type IN (%s, %s, %s)",
+        (run_id, "blog", "speakable", "citations"),
+    )
 
-    print(f"\n📄 Writing to Google Doc '{DOC_TITLE}'...")
+    # Insert new entries
+    execute(
+        """
+        INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (run_id, "blog", blog_r2_key, Json({
+            "primary_keyword": plan["primary_keyword"],
+            "target_countries": plan["target_countries"],
+            "word_count": count_words(full_blog),
+        })),
+    )
 
-    doc_id = _get_or_create_doc(DOC_TITLE)
-    doc_url = write_markdown_to_doc(doc_id, full_blog, DOC_TITLE)
+    execute(
+        """
+        INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (run_id, "speakable", speakable_r2_key, Json({"count": len(speakables)})),
+    )
 
-    print(f"\n  📝 Outputs:")
-    print(f"     Doc URL  : {doc_url}")
-    print(f"     Blog   → '{OUTPUT_TAB}' sheet")
-    print(f"     Voice  → '{SPEAKABLE_TAB}' sheet ({len(speakables)} candidates)")
-    print(f"     Cites  → '{CITATIONS_TAB}' sheet ({len(citations)} to verify)")
+    execute(
+        """
+        INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (run_id, "citations", citations_r2_key, Json({"count": len(citations)})),
+    )
 
+    print("\n  📝 Outputs saved:")
+    print(f"     Blog        → {blog_r2_key}")
+    print(f"     Speakables  → {speakable_r2_key}")
+    print(f"     Citations   → {citations_r2_key}")
 
 if __name__ == "__main__":
     main()

@@ -1,246 +1,251 @@
-# ─── CELL A: Question Bank Builder (NEW — Repurposing Pipeline stage 1) ─
-#
+# ─────────────────────────────────────────────────────────────
+# QUESTION BANK BUILDER
+# ─────────────────────────────────────────────────────────────
 # PURPOSE:
-#   Read every question-shaped asset the pipeline has already collected
-#   (PAA, autocomplete, related searches, forum insights, competitor FAQs)
-#   and consolidate into one deduplicated, intent-tagged, priority-scored
-#   sheet: Question_Bank.
+#   Consolidates all question-type signals (PAA, autocomplete,
+#   related searches, forum insights, competitor FAQs) into a
+#   deduplicated, intent-tagged, priority-scored dataset.
 #
-# This is raw material for Cell B, which generates Quora/Reddit/Substack
-# drafts. Nothing is published here — just data consolidation.
+# INPUT:
+#   - paa_questions
+#   - search_suggestions (autocomplete + related)
+#   - forum_master_insights
+#   - competitor_pages (FAQs)
+#   - run_keywords (country + keyword context)
 #
-# Reads  : Keyword_n8n >
-#            PAA, Other_Autocomplete, Related_search,
-#            Forum_Master_Insights, Url_data_ext (FAQs column),
-#            keyword (for country codes + primary keyword)
-# Writes : Keyword_n8n > Question_Bank
-# ─────────────────────────────────────────────────────────────────────
+# PROCESS:
+#   - Normalizes fragments into questions
+#   - Removes spam via regex filters
+#   - Deduplicates via Jaccard similarity
+#   - Classifies intent + funnel stage
+#   - Detects country context
+#   - Computes priority score
+#
+# OUTPUT:
+#   - Question bank → R2 (outputs/{run_id}/question_bank.json)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Stage 5 (repurposing pipeline)
+#   - Feeds platform draft generator (cell_37)
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-
-from stages.cells.cell_23_shared_utils import *
-
+import json
+import os
 import re
-import time
 from datetime import datetime
-from app.utils.helper import get_sheet_client
-import gspread
+from collections import Counter
+
+from psycopg2.extras import Json
+
+from app.database import fetch_all, execute
+from app.storage import r2_put_text
+from app.repositories.run_repo import get_run_keywords
 
 # Import from the two config files
 from config import (
-    SPREADSHEET_NAME, SCOPES, MAX_CELL,
+     MAX_CELL, GEMINI_API_KEY,
     COUNTRY_MAP, get_country_name, detect_specialty,
 )
 from config_repurpose import (
-    REPURPOSE_TABS, QUESTION_BANK_FILTERS, QUESTION_PRIORITY_WEIGHTS,
+    QUESTION_BANK_FILTERS, QUESTION_PRIORITY_WEIGHTS,
 )
 
-# ── Auth ─────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 
-# ── Sheet helpers (reused pattern from v16 cells) ────────────────────
+# ── Helpers  ────────────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
 
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(4 * (attempt + 1))
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True,
-                        "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60},
-    })
-
-
-def get_or_create_tab(spreadsheet, tab_name, rows=1000, cols=12):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-    return ws
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Source loaders — each returns list of dicts
 # ═══════════════════════════════════════════════════════════════════
 
-def load_paa(sp):
-    try:
-        ws = sp.worksheet("PAA")
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_paa(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT question, keyword, country_code
+        FROM paa_questions
+        WHERE run_id = %s
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
     out = []
-    for r in records:
-        q = str(r.get("Question", "")).strip()
-        kw = str(r.get("Keyword", "")).strip()
-        cc = str(r.get("Country_Code", "")).strip().lower()
+    for r in rows:
+        q = str(r.get("question", "") or "").strip()
         if q:
             out.append({
-                "question": q, "source": "paa",
-                "source_keyword": kw, "country_code": cc,
+                "question": q,
+                "source": "paa",
+                "source_keyword": str(r.get("keyword", "") or "").strip(),
+                "country_code": str(r.get("country_code", "") or "").strip().lower(),
             })
     return out
 
 
-def load_autocomplete(sp):
-    try:
-        ws = sp.worksheet("Other_Autocomplete")
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_autocomplete(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT suggestion, keyword, country_code
+        FROM search_suggestions
+        WHERE run_id = %s
+          AND source = 'autocomplete'
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
+
     out = []
-    for r in records:
-        raw= str(
-            r.get("Suggestion",r.get("Suggestions",r.get("suggestions","")))
-        ).strip()
-
-        kw = str(r.get("Keyword", "")).strip()
-        cc = str(r.get("Country_Code", "")).strip().lower()
-
-        if not raw:
-            continue
-
-        for s in raw.split("|"):
-            s = s.strip()
-            if s and "?" not in s and len(s.split()) >=3:
-                q = _reshape_to_question(s)
-                if q:
-                    out.append({
-                        "question": q,
-                        "source": "autocomplete",
-                        "source_keyword": kw,
-                        "country_code": cc,
-                        "original_fragment": s,
-                    })
-
-    return out
-
-
-def load_related(sp):
-    try:
-        ws = sp.worksheet("Related_search")
-        records = ws.get_all_records()
-    except Exception:
-        return []
-    out = []
-    for r in records:
-        q = str(r.get("Related_Query", "")).strip()
-        kw = str(r.get("Keyword", "")).strip()
-        cc = str(r.get("Country_Code", "")).strip().lower()
-        if q:
-            reshaped = _reshape_to_question(q) if "?" not in q else q
-            if reshaped:
+    for r in rows:
+        s = str(r.get("suggestion", "") or "").strip()
+        if s and "?" not in s and len(s.split()) >= 3:
+            q = _reshape_to_question(s)
+            if q:
                 out.append({
-                    "question": reshaped, "source": "related",
-                    "source_keyword": kw, "country_code": cc,
-                    "original_fragment": q,
+                    "question": q,
+                    "source": "autocomplete",
+                    "source_keyword": str(r.get("keyword", "") or "").strip(),
+                    "country_code": str(r.get("country_code", "") or "").strip().lower(),
+                    "original_fragment": s,
                 })
     return out
 
 
-def load_forum_insights(sp):
-    try:
-        ws = sp.worksheet("Forum_Master_Insights")
-        records = ws.get_all_records()
-    except Exception:
-        return []
-    out = []
-    for r in records:
-        insight_type = str(r.get("Insight_Type", "")).strip()
-        text = str(r.get("Clean_Insight", r.get("Insight_Text", ""))).strip()
-        priority = r.get("Priority_Score", 1)
-        country = str(r.get("Detected_Country", "")).strip().lower()
+def load_related(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT suggestion, keyword, country_code
+        FROM search_suggestions
+        WHERE run_id = %s
+          AND source = 'related'
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    )
 
-        # We care about Patient_Question, Objection, and Content_Gap
+    out = []
+    for r in rows:
+        raw = str(r.get("suggestion", "") or "").strip()
+        if raw:
+            q = _reshape_to_question(raw) if "?" not in raw else raw
+            if q:
+                out.append({
+                    "question": q,
+                    "source": "related",
+                    "source_keyword": str(r.get("keyword", "") or "").strip(),
+                    "country_code": str(r.get("country_code", "") or "").strip().lower(),
+                    "original_fragment": raw,
+                })
+    return out
+
+
+def load_forum_insights(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT insight_type, clean_insight, insight_text, priority_score, detected_country
+        FROM forum_master_insights
+        WHERE run_id = %s
+        ORDER BY priority_score DESC
+        """,
+        (run_id,),
+    )
+
+    out = []
+    for r in rows:
+        insight_type = str(r.get("insight_type", "") or "").strip()
+        text = str(r.get("clean_insight", "") or r.get("insight_text", "") or "").strip()
+        priority = r.get("priority_score", 1)
+        country = str(r.get("detected_country", "") or "").strip().lower()
+
         if insight_type == "Patient_Question" and text:
             if "?" not in text:
                 text = text.rstrip(".") + "?"
             out.append({
-                "question": text, "source": "forum_question",
-                "priority_hint": priority, "country_code": country,
+                "question": text,
+                "source": "forum_question",
+                "priority_hint": priority,
+                "country_code": country,
             })
+
         elif insight_type == "Objection" and text:
             q = _objection_to_question(text)
             if q:
                 out.append({
-                    "question": q, "source": "forum_objection",
-                    "priority_hint": priority, "country_code": country,
+                    "question": q,
+                    "source": "forum_objection",
+                    "priority_hint": priority,
+                    "country_code": country,
                     "original_objection": text,
                 })
+
         elif insight_type == "Content_Gap" and text:
             q = _gap_to_question(text)
             if q:
                 out.append({
-                    "question": q, "source": "forum_gap",
-                    "priority_hint": priority, "country_code": country,
+                    "question": q,
+                    "source": "forum_gap",
+                    "priority_hint": priority,
+                    "country_code": country,
                     "original_gap": text,
                 })
+
     return out
 
 
-def load_competitor_faqs(sp):
-    try:
-        ws = sp.worksheet("Url_data_ext")
-        records = ws.get_all_records()
-    except Exception:
-        return []
+def load_competitor_faqs(run_id: int):
+    rows = fetch_all(
+        """
+        SELECT url, faqs_json
+        FROM competitor_pages
+        WHERE run_id = %s
+          AND status = 'success'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+
     out = []
-    for r in records:
-        faq_blob = str(r.get("FAQs", "")).strip()
-        url = str(r.get("URL", "")).strip()
-        if not faq_blob or faq_blob == "nan":
+
+    for r in rows:
+        faqs = r.get("faqs_json") or []
+        url = str(r.get("url", "") or "").strip()
+
+        if isinstance(faqs, str):
+            try:
+                faqs = json.loads(faqs)
+            except Exception:
+                faqs = []
+
+        if isinstance(faqs, dict):
+            faqs = list(faqs.values())
+
+        if not isinstance(faqs, list):
             continue
-        # Parse Q/A pairs
-        pairs = re.findall(
-            r"Q\d+\s*:\s*(.+?)\s*\nA\d+\s*:\s*(.+?)(?=\nQ\d+\s*:|$)",
-            faq_blob, re.DOTALL,
-        )
-        for q, a in pairs:
-            q = q.strip()
-            a = a.strip()[:800]  # keep answer as reference
+
+        for item in faqs:
+            if isinstance(item, dict):
+                q = str(item.get("question", "") or item.get("Question", "") or "").strip()
+                a = str(item.get("answer", "") or item.get("Answer", "") or "").strip()
+            else:
+                q = str(item or "").strip()
+                a = ""
+
             if q and len(q) > 15:
                 if "?" not in q:
                     q = q.rstrip(".") + "?"
                 out.append({
-                    "question": q, "source": "competitor_faq",
+                    "question": q,
+                    "source": "competitor_faq",
                     "competitor_url": url,
-                    "competitor_answer_ref": a,
+                    "competitor_answer_ref": a[:800],
                 })
+
     return out
-
-
-def load_keyword_context(sp):
-    """Return primary keyword, all keywords, target countries."""
-    try:
-        ws = sp.worksheet("keyword")
-        records = ws.get_all_records()
-    except Exception:
-        return {"primary": "", "all_keywords": [], "countries": []}
-    kws, ccs = [], set()
-    for r in records:
-        k = str(r.get("Keyword", "")).strip()
-        c = str(r.get("Country_Code", "")).strip().lower()
-        if k:
-            kws.append(k)
-        if c:
-            ccs.add(c)
-    primary = max(kws, key=lambda k: len(k.split())) if kws else ""
-    return {"primary": primary, "all_keywords": kws, "countries": sorted(ccs)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -460,14 +465,33 @@ def priority_score(q: dict) -> float:
 # ═══════════════════════════════════════════════════════════════════
 
 print("\n" + "═" * 65)
-print("  QUESTION BANK BUILDER")
+print("  🧠 QUESTION BANK BUILDER")
 print("  Consolidates PAA + autocomplete + related + forum + comp-FAQ")
 print("═" * 65)
 
-sp = gc.open(SPREADSHEET_NAME)
+run_id_raw = os.getenv("RUN_ID")
+if not run_id_raw:
+    raise RuntimeError("RUN_ID env var is required")
+run_id = int(run_id_raw)
 
 # Load context
-ctx = load_keyword_context(sp)
+kw_rows = get_run_keywords(run_id)
+
+kws = [str(r.get("keyword", "")).strip() for r in kw_rows if r.get("keyword")]
+ccs = sorted({
+    str(r.get("country_code", "")).strip().lower()
+    for r in kw_rows
+    if r.get("country_code")
+})
+
+primary = max(kws, key=lambda k: len(k.split())) if kws else ""
+
+ctx = {
+    "primary": primary,
+    "all_keywords": kws,
+    "countries": ccs,
+}
+
 specialty = detect_specialty(ctx["primary"]) if ctx["primary"] else "general"
 print(f"\n  📌 Primary keyword : {ctx['primary'] or '(unknown)'}")
 print(f"  🏥 Specialty       : {specialty}")
@@ -475,11 +499,12 @@ print(f"  🌍 Countries       : {', '.join(ctx['countries']) or '(none)'}")
 
 # Load all sources
 print("\n  Loading sources...")
-src_paa         = load_paa(sp)
-src_autocomp    = load_autocomplete(sp)
-src_related     = load_related(sp)
-src_forum       = load_forum_insights(sp)
-src_comp_faqs   = load_competitor_faqs(sp)
+
+src_paa = load_paa(run_id)
+src_autocomp = load_autocomplete(run_id)
+src_related = load_related(run_id)
+src_forum = load_forum_insights(run_id)
+src_comp_faqs = load_competitor_faqs(run_id)
 
 print(f"    PAA               : {len(src_paa)}")
 print(f"    Autocomplete      : {len(src_autocomp)}")
@@ -535,20 +560,58 @@ for i, q in enumerate(deduped, 1):
         datetime.now().isoformat(timespec="seconds"),
     ])
 
-# Write to sheet
-print(f"\n  Writing to '{REPURPOSE_TABS['question_bank']}'...")
-out_ws = get_or_create_tab(
-    sp, REPURPOSE_TABS["question_bank"],
-    rows=max(len(rows_out) + 20, 500),
-    cols=len(HEADERS),
-)
-_write_with_retry(out_ws, rows_out)
-_fmt_header(out_ws, len(HEADERS))
+# Save question bank to R2 + generated_outputs
+question_bank_r2_key = f"outputs/{run_id}/question_bank.json"
 
+question_bank_payload = {
+    "headers": HEADERS,
+    "rows": rows_out[1:],
+    "questions": deduped,
+    "metadata": {
+        "primary_keyword": ctx["primary"],
+        "countries": ctx["countries"],
+        "specialty": specialty,
+        "question_count": len(deduped),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    },
+}
+
+r2_put_text(
+    question_bank_r2_key,
+    json.dumps(question_bank_payload, ensure_ascii=False, default=str),
+)
+
+execute(
+    """
+    DELETE FROM generated_outputs
+    WHERE run_id = %s
+      AND output_type = %s
+    """,
+    (run_id, "question_bank"),
+)
+
+execute(
+    """
+    INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+    VALUES (%s, %s, %s, %s)
+    """,
+    (
+        run_id,
+        "question_bank",
+        question_bank_r2_key,
+        Json({
+            "primary_keyword": ctx["primary"],
+            "countries": ctx["countries"],
+            "specialty": specialty,
+            "question_count": len(deduped),
+        }),
+    ),
+)
+
+print(f"\n  💾 Question bank saved → {question_bank_r2_key}")
 # Summary by source
 print(f"\n  ✅ Question Bank built: {len(deduped)} unique questions")
 print(f"\n  Breakdown by source:")
-from collections import Counter
 source_counts = Counter(q["source"] for q in deduped)
 for source, count in source_counts.most_common():
     print(f"    {source:<20}: {count}")
@@ -563,5 +626,5 @@ for q in deduped[:5]:
     print(f"    [{q['priority']}] {q['question'][:80]}")
 
 print("\n" + "═" * 65)
-print(f"  NEXT: Run Cell B (Platform Draft Generator)")
+print("  NEXT: Platform draft generator stage")
 print("═" * 65)

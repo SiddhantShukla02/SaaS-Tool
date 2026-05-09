@@ -1,87 +1,70 @@
-# ─── CELL B: Platform Draft Generator (NEW — Repurposing Pipeline stage 2) ─
-#
+# ─────────────────────────────────────────────────────────────
+# PLATFORM DRAFT GENERATOR
+# ─────────────────────────────────────────────────────────────
 # PURPOSE:
-#   Reads Question_Bank and generates platform-appropriate drafts for:
-#     - Quora (800-word authoritative answers)
-#     - Reddit (400-word empathetic, non-promotional posts)
-#     - Substack (2,000-word themed essays clustering 5-8 questions)
+#   Generates platform-specific repurposing drafts for Quora,
+#   Reddit, and Substack from the question bank.
 #
-# Uses the existing pipeline's answer-hooks where available:
-#   - Competitor_Answer_Ref from Url_data_ext → seeds Quora draft
-#   - Forum_Master_MD voice quotes → seeds Reddit draft
-#   - Blog_Output existing blog content → reference context
+# INPUT:
+#   - question_bank output (R2 + Postgres)
+#   - forum_master_md ALL_CATEGORIES
+#   - final blog output
 #
-# Reads  : Keyword_n8n > Question_Bank, Forum_Master_MD, Url_data_ext,
-#                        Blog_Output (if exists, for cross-reference context)
-# Writes : Keyword_n8n > Quora_Drafts, Reddit_Drafts, Substack_Drafts
-# ─────────────────────────────────────────────────────────────────────
+# PROCESS:
+#   - Loads prioritized questions from R2
+#   - Builds platform-specific prompts
+#   - Generates Quora answers, Reddit replies, and Substack essays
+#   - Applies platform policy rules and YMYL safeguards
+#
+# OUTPUT:
+#   - Quora drafts → R2 (outputs/{run_id}/quora_drafts.json)
+#   - Reddit drafts → R2 (outputs/{run_id}/reddit_drafts.json)
+#   - Substack drafts → R2 (outputs/{run_id}/substack_drafts.json)
+#   - Metadata → Postgres (generated_outputs)
+#
+# NOTES:
+#   - Stage 5 repurposing output
+#   - Drafts are review-only; nothing is auto-published
+#   - No Google Sheets dependency
+# ─────────────────────────────────────────────────────────────
 
-from stages.cells.cell_23_shared_utils import *
-
+import json
+import os
 import re
 import time
-import json
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime
 
-import gspread
+from psycopg2.extras import Json
 from google import genai
-from app.utils.helper import get_sheet_client
 from google.genai import types
 
+from app.database import fetch_one, execute
+from app.storage import r2_get_text, r2_put_text
+
 from config import (
-    GEMINI_API_KEY, GEMINI_MODEL, SPREADSHEET_NAME,
-    SCOPES, MAX_CELL, MAX_TOKENS, SAFETY_OFF,
+    GEMINI_API_KEY, GEMINI_MODEL,
+    MAX_CELL, MAX_TOKENS, SAFETY_OFF,
     BRAND, CITATION_ALLOWLIST, all_allowed_citations,
-    COUNTRY_PERSONAS, get_persona, get_country_name,
-    YMYL_DISCLAIMERS, FORBIDDEN_MEDICAL_CLAIMS,
+    get_persona, get_country_name,
+    FORBIDDEN_MEDICAL_CLAIMS,
     TEMP_FAQ_ANSWER, TEMP_BLOG_SECTION,
 )
 from config_repurpose import (
-    REPURPOSE_TABS, PLATFORM_SPECS, SUBREDDIT_ALLOWLIST,
-    QUORA_POLICY, REDDIT_POLICY, SUBSTACK_SETTINGS,
+    PLATFORM_SPECS, SUBREDDIT_ALLOWLIST,
+    QUORA_POLICY, REDDIT_POLICY,
 )
 
+from stages.cells.cell_23_shared_utils import *
+
 # ── Auth ─────────────────────────────────────────────────────────────
-gc = get_sheet_client(SCOPES)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-# ── Sheet helpers ────────────────────────────────────────────────────
+# ── Helpers (output truncation for storage safety) ────────────
 def _trunc(v):
     s = str(v) if v is not None else ""
     return s[:MAX_CELL] + "\n[TRUNCATED]" if len(s) > MAX_CELL else s
-
-
-def _write_with_retry(ws, data, retries=3):
-    for attempt in range(retries):
-        try:
-            ws.update(data, value_input_option="RAW")
-            return True
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(4 * (attempt + 1))
-            else:
-                print(f"  ❌ Sheet write failed: {e}")
-                return False
-
-
-def _fmt_header(ws, n_cols):
-    col_letter = chr(64 + min(n_cols, 26))
-    ws.format(f"A1:{col_letter}1", {
-        "textFormat": {"bold": True,
-                        "foregroundColor": {"red":1,"green":1,"blue":1}},
-        "backgroundColor": {"red": 0.13, "green": 0.37, "blue": 0.60},
-    })
-
-
-def get_or_create_tab(spreadsheet, tab_name, rows=500, cols=14):
-    try:
-        ws = spreadsheet.worksheet(tab_name)
-        ws.clear()
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
-    return ws
 
 
 # ── Gemini call with temperature ────────────────────────────────────
@@ -116,53 +99,69 @@ def count_words(text: str) -> int:
 # Data loaders
 # ═══════════════════════════════════════════════════════════════════
 
-def load_question_bank(sp):
-    try:
-        ws = sp.worksheet(REPURPOSE_TABS["question_bank"])
-        records = ws.get_all_records()
-    except Exception:
-        print("  ❌ Question_Bank sheet not found. Run Cell A first.")
+def load_question_bank(run_id: int):
+    row = fetch_one(
+        """
+        SELECT r2_key
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "question_bank"),
+    )
+
+    if not row:
+        print("  ❌ Question bank output not found. Run question bank builder first.")
         return []
-    return records
+
+    payload = json.loads(r2_get_text(row["r2_key"]) or "{}")
+    headers = payload.get("headers", [])
+    rows = payload.get("rows", [])
+
+    return [
+        dict(zip(headers, row_values))
+        for row_values in rows
+    ]
 
 
-def load_forum_voice(sp, max_chars=5000):
-    """Get patient-voice snippets for Reddit tone calibration."""
-    try:
-        ws = sp.worksheet("Forum_Master_MD")
-        records = ws.get_all_records()
+def load_forum_voice(run_id: int, max_chars=5000):
+    row = fetch_one(
+        """
+        SELECT r2_key
+        FROM forum_master_md
+        WHERE run_id = %s
+          AND insight_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "ALL_CATEGORIES"),
+    )
 
-        for r in records:
-            if str(r.get("Insight_Type", "")).strip() == "ALL_CATEGORIES":
-                md = str(r.get("Prompt_Ready_Markdown", "")).strip()
-                if md and md.lower() != "nan":
-                    return md[:max_chars]
+    if not row:
+        return ""
 
-        # fallback: merge category rows if ALL_CATEGORIES missing
-        blocks = []
-        for r in records:
-            md = str(r.get("Prompt_Ready_Markdown", "")).strip()
-            if md and md.lower() != "nan":
-                blocks.append(md)
-
-        return "\n\n---\n\n".join(blocks)[:max_chars]
-
-    except Exception:
-        pass
-
-    return ""
+    return (r2_get_text(row["r2_key"]) or "")[:max_chars]
 
 
-def load_existing_blog(sp, max_chars=6000):
-    """Get the blog's existing markdown for cross-reference context."""
-    try:
-        ws = sp.worksheet("Blog_Output")
-        records = ws.get_all_records()
-        if records:
-            return str(records[0].get("Full_Blog_Markdown", ""))[:max_chars]
-    except Exception:
-        pass
-    return ""
+def load_existing_blog(run_id: int, max_chars=6000):
+    row = fetch_one(
+        """
+        SELECT r2_key
+        FROM generated_outputs
+        WHERE run_id = %s
+          AND output_type = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, "blog"),
+    )
+
+    if not row:
+        return ""
+
+    return (r2_get_text(row["r2_key"]) or "")[:max_chars]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -644,103 +643,195 @@ def generate_substack_drafts(bank: list, blog_ref: str,
 
 print("\n" + "═" * 65)
 print("  PLATFORM DRAFT GENERATOR")
-print("  Generates Quora + Reddit + Substack drafts from Question_Bank")
+print("  Generates selected platform drafts from question bank")
 print("═" * 65)
 
-sp = gc.open(SPREADSHEET_NAME)
+run_id_raw = os.getenv("RUN_ID")
+if not run_id_raw:
+    raise RuntimeError("RUN_ID env var is required")
+run_id = int(run_id_raw)
 
 # Load question bank
-print("\n  Loading Question_Bank...")
-bank = load_question_bank(sp)
+print("\n  Loading question bank...")
+bank = load_question_bank(run_id)
 if not bank:
-    print("❌ Question_Bank is empty. Run Cell A (Question Bank Builder) first.")
+    print("❌ Question bank is empty. Run question bank builder first.")
 else:
-    print(f"  ✅ Loaded {len(bank)} questions from Question_Bank")
+    print(f"  ✅ Loaded {len(bank)} questions from question bank")
 
     # Get specialty from first row
-    specialty = bank[0].get("Specialty", "general") if bank else "general"
+    specialty = bank[0].get("Specialty") if bank else None
+    specialty = specialty if isinstance(specialty, str) and specialty.strip() else "general"
 
     # Load supporting context
     print("\n  Loading supporting context...")
-    forum_voice = load_forum_voice(sp)
-    blog_ref    = load_existing_blog(sp)
+    forum_voice = load_forum_voice(run_id)
+    blog_ref    = load_existing_blog(run_id)
     print(f"    Forum voice data   : {len(forum_voice)} chars")
     print(f"    Existing blog ref  : {len(blog_ref)} chars")
 
-    # Decide what to generate based on bank size
+    # Decide what to generate based on selected platform mode
+    platform_mode = os.environ.get("SAAS_PLATFORM", "all").strip().lower()
+    valid_platform_modes = {"quora", "reddit", "substack", "all"}
+
+    if platform_mode not in valid_platform_modes:
+        raise RuntimeError(f"Invalid SAAS_PLATFORM: {platform_mode}")
+
+    print(f"\n  Platform mode: {platform_mode}")
+
     bank_size = len(bank)
     quora_limit    = min(30, bank_size)
     reddit_limit   = min(15, max(5, bank_size // 4))
     substack_limit = min(6, max(2, bank_size // 20))
 
+    quora_drafts = []
+    reddit_drafts = []
+    substack_drafts = []
+
     # ══ QUORA ══
-    print(f"\n  ─── Generating Quora drafts (target {quora_limit}) ───")
-    quora_drafts = generate_quora_drafts(
-        bank, forum_voice, blog_ref, limit=quora_limit,
-    )
-    if quora_drafts:
-        HEADERS = list(quora_drafts[0].keys())
-        rows = [HEADERS] + [[_trunc(d[h]) for h in HEADERS] for d in quora_drafts]
-        ws = get_or_create_tab(sp, REPURPOSE_TABS["quora_drafts"],
-                                rows=max(len(rows)+20, 100),
-                                cols=len(HEADERS))
-        _write_with_retry(ws, rows)
-        _fmt_header(ws, len(HEADERS))
-        print(f"  ✅ {len(quora_drafts)} Quora drafts written to "
-              f"'{REPURPOSE_TABS['quora_drafts']}'")
+    if platform_mode in ("quora", "all"):
+        print(f"\n  ─── Generating Quora drafts (target {quora_limit}) ───")
+        quora_drafts = generate_quora_drafts(
+            bank, forum_voice, blog_ref, limit=quora_limit,
+        )
+
+        if quora_drafts:
+            quora_r2_key = f"outputs/{run_id}/quora_drafts.json"
+
+            r2_put_text(
+                quora_r2_key,
+                json.dumps(quora_drafts, ensure_ascii=False, default=str),
+            )
+
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "quora_drafts"),
+            )
+
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "quora_drafts",
+                    quora_r2_key,
+                    Json({"count": len(quora_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(quora_drafts)} Quora drafts saved → {quora_r2_key}")
+    else:
+        print("  ⏭️  Skipping Quora drafts")
 
     # ══ REDDIT ══
-    print(f"\n  ─── Generating Reddit drafts (target {reddit_limit}) ───")
-    reddit_drafts = generate_reddit_drafts(
-        bank, forum_voice, specialty, limit=reddit_limit,
-    )
-    if reddit_drafts:
-        HEADERS = list(reddit_drafts[0].keys())
-        rows = [HEADERS] + [[_trunc(d[h]) for h in HEADERS] for d in reddit_drafts]
-        ws = get_or_create_tab(sp, REPURPOSE_TABS["reddit_drafts"],
-                                rows=max(len(rows)+20, 100),
-                                cols=len(HEADERS))
-        _write_with_retry(ws, rows)
-        _fmt_header(ws, len(HEADERS))
-        print(f"  ✅ {len(reddit_drafts)} Reddit drafts written to "
-              f"'{REPURPOSE_TABS['reddit_drafts']}'")
-        no_sub = sum(1 for d in reddit_drafts if not d["Suggested_Subreddit"])
-        if no_sub:
-            print(f"  ⚠️  {no_sub} drafts have no suggested subreddit "
-                  f"(SUBREDDIT_ALLOWLIST in config_repurpose.py is empty)")
+    if platform_mode in ("reddit", "all"):
+        print(f"\n  ─── Generating Reddit drafts (target {reddit_limit}) ───")
+        reddit_drafts = generate_reddit_drafts(
+            bank, forum_voice, specialty, limit=reddit_limit,
+        )
+
+        if reddit_drafts:
+            reddit_r2_key = f"outputs/{run_id}/reddit_drafts.json"
+
+            r2_put_text(
+                reddit_r2_key,
+                json.dumps(reddit_drafts, ensure_ascii=False, default=str),
+            )
+
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "reddit_drafts"),
+            )
+
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "reddit_drafts",
+                    reddit_r2_key,
+                    Json({"count": len(reddit_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(reddit_drafts)} Reddit drafts saved → {reddit_r2_key}")
+
+            no_sub = sum(1 for d in reddit_drafts if not d["Suggested_Subreddit"])
+            if no_sub:
+                print(f"  ⚠️  {no_sub} drafts have no suggested subreddit "
+                      f"(SUBREDDIT_ALLOWLIST in config_repurpose.py is empty)")
+    else:
+        print("  ⏭️  Skipping Reddit drafts")
 
     # ══ SUBSTACK ══
-    print(f"\n  ─── Generating Substack essays (target {substack_limit}) ───")
-    substack_drafts = generate_substack_drafts(
-        bank, blog_ref, max_essays=substack_limit,
-    )
-    if substack_drafts:
-        HEADERS = list(substack_drafts[0].keys())
-        rows = [HEADERS] + [[_trunc(d[h]) for h in HEADERS] for d in substack_drafts]
-        ws = get_or_create_tab(sp, REPURPOSE_TABS["substack_drafts"],
-                                rows=max(len(rows)+20, 50),
-                                cols=len(HEADERS))
-        _write_with_retry(ws, rows)
-        _fmt_header(ws, len(HEADERS))
-        print(f"  ✅ {len(substack_drafts)} Substack essays written to "
-              f"'{REPURPOSE_TABS['substack_drafts']}'")
+    if platform_mode in ("substack", "all"):
+        print(f"\n  ─── Generating Substack essays (target {substack_limit}) ───")
+        substack_drafts = generate_substack_drafts(
+            bank, blog_ref, max_essays=substack_limit,
+        )
+
+        if substack_drafts:
+            substack_r2_key = f"outputs/{run_id}/substack_drafts.json"
+
+            r2_put_text(
+                substack_r2_key,
+                json.dumps(substack_drafts, ensure_ascii=False, default=str),
+            )
+
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "substack_drafts"),
+            )
+
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "substack_drafts",
+                    substack_r2_key,
+                    Json({"count": len(substack_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(substack_drafts)} Substack essays saved → {substack_r2_key}")
+    else:
+        print("  ⏭️  Skipping Substack drafts")
 
     # ── Summary ──
     print("\n" + "═" * 65)
     print("  REPURPOSING PIPELINE COMPLETE")
     print("═" * 65)
-    print(f"  Output sheets in '{SPREADSHEET_NAME}':")
-    print(f"    • {REPURPOSE_TABS['quora_drafts']}    "
-          f"({len(quora_drafts) if quora_drafts else 0} drafts)")
-    print(f"    • {REPURPOSE_TABS['reddit_drafts']}   "
-          f"({len(reddit_drafts) if reddit_drafts else 0} drafts)")
-    print(f"    • {REPURPOSE_TABS['substack_drafts']} "
-          f"({len(substack_drafts) if substack_drafts else 0} essays)")
-    print(f"\n  NEXT STEPS (manual):")
-    print(f"    1. Review each draft in the sheet")
-    print(f"    2. Edit Review_Status column: 'approved' / 'rejected' / 'edit_needed'")
-    print(f"    3. Post approved Quora drafts manually (disclosure included)")
-    print(f"    4. Post approved Reddit drafts manually to vetted subreddits")
-    print(f"    5. Publish Substack essays via Substack editor or API")
-    print(f"    6. Record posted URLs in the Posted_URL / Published_URL column")
+    print("  Outputs saved to R2 + generated_outputs:")
+    print(f"    • outputs/{run_id}/quora_drafts.json "
+        f"({len(quora_drafts) if quora_drafts else 0} drafts)")
+    print(f"    • outputs/{run_id}/reddit_drafts.json "
+        f"({len(reddit_drafts) if reddit_drafts else 0} drafts)")
+    print(f"    • outputs/{run_id}/substack_drafts.json "
+        f"({len(substack_drafts) if substack_drafts else 0} essays)")
+    print("\n  NEXT STEPS (manual):")
+    print("    1. Review drafts from R2 output files")
+    print("    2. Edit Review_Status in future review UI/workflow")
+    print("    3. Post approved Quora drafts manually (disclosure included)")
+    print("    4. Post approved Reddit drafts manually to vetted subreddits")
+    print("    5. Publish Substack essays via Substack editor or API")
+    print("    6. Record posted URLs later in DB-backed review workflow")
     print("═" * 65)

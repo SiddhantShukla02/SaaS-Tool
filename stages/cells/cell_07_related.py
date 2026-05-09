@@ -1,37 +1,47 @@
-"""
-Related Searches Fetcher (via Brave Search API)
-=================================================
-Reads:  Keyword_n8n → "keyword" tab  (columns: Keyword, Country_Code)
-Writes: Keyword_n8n → "Related_search" tab
+# ─────────────────────────────────────────────────────────────
+# RELATED SEARCHES FETCHER
+# ─────────────────────────────────────────────────────────────
+# PURPOSE:
+#   Fetches related search queries for each keyword using Brave Search API.
+#
+# INPUT:
+#   - run_keywords (Postgres)
+#     → keyword, country_code
+#
+# PROCESS:
+#   - Deduplicates keyword/country pairs
+#   - Calls Brave Search API
+#   - Extracts:
+#       → native related queries
+#       → infobox suggestions
+#       → title-derived queries
+#   - Expands coverage using modifiers (cost, treatment, guide)
+#
+# OUTPUT:
+#   - Stored in DB via save_related_searches
+#   - Used in question bank and blog generation
+#
+# NOTES:
+#   - REQUEST_DELAY controls API pacing
+#   - No Google Sheets dependency
+#
+# WHY BRAVE (instead of pytrends):
+#   - pytrends frequently hits rate limits
+#   - returns little/no data for niche medical queries
+#   - Brave provides consistent related query data via API
+# ─────────────────────────────────────────────────────────────
 
-WHY BRAVE INSTEAD OF PYTRENDS:
-  - pytrends hits Google 429 rate limits on 2/3 requests
-  - pytrends returns NO_DATA for 95% of niche medical keywords
-  - Brave Search API: 2,000 free queries/month, reliable, returns
-    "related searches" directly in the response JSON
-
-Strategy:
-  For each keyword × country, we make TWO Brave searches:
-    1. The keyword itself → extract Brave's "related searches" from response
-    2. The keyword + "related" → extract title-derived query suggestions
-  This reliably produces 15-30 related queries per keyword vs pytrends' 0.
-"""
-
+import os
 import time
+
 import requests
-import gspread
-# ─── PATCHED v16.1: Brave key from config, break bug fixed ────
-from config import BRAVE_API_KEY, SPREADSHEET_NAME, SCOPES
 
-from app.utils.helper import get_sheet_client
-# ──────────────────────────────────────────────────────────────
+from app.repositories.run_repo import get_run_keywords
+from app.repositories.search_repo import save_related_searches
+from config import BRAVE_API_KEY
 
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-INPUT_TAB            = "keyword"
-OUTPUT_TAB           = "Related_search"
+# ── Related search settings ──────────────────────────────────
 
 REQUEST_DELAY = 1.0   # Seconds between Brave API calls
 
@@ -43,34 +53,6 @@ COUNTRY_MAP = {
     "pk": "PK", "bd": "BD", "lk": "LK", "np": "NP", "iq": "IQ",
     "om": "OM", "qa": "QA", "bh": "BH", "kw": "KW",
 }
-
-
-
-
-# ─────────────────────────────────────────────
-# READ KEYWORDS
-# ─────────────────────────────────────────────
-def read_keywords(spreadsheet) -> list:
-    ws      = spreadsheet.worksheet(INPUT_TAB)
-    records = ws.get_all_records()
-
-    if not records:
-        raise ValueError(f"❌ '{INPUT_TAB}' tab is empty or missing headers.")
-
-    keywords = []
-    for i, row in enumerate(records, start=2):
-        kw      = str(row.get("Keyword",      "")).strip()
-        country = str(row.get("Country_Code", "")).strip().lower()
-
-        if not kw:
-            continue
-        if not country:
-            continue
-
-        keywords.append({"keyword": kw, "country": country})
-
-    print(f"✅ Loaded {len(keywords)} keyword/country pairs from '{INPUT_TAB}'")
-    return keywords
 
 # ─────────────────────────────────────────────
 # BRAVE SEARCH → RELATED QUERIES
@@ -219,35 +201,30 @@ def extract_related_queries(keyword, country_code):
     return list(all_queries.values())
 
 # ─────────────────────────────────────────────
-# WRITE RESULTS
-# ─────────────────────────────────────────────
-def write_results(spreadsheet, rows):
-    try:
-        ws = spreadsheet.worksheet(OUTPUT_TAB)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=OUTPUT_TAB, rows=2000, cols=10)
-        print(f"  ℹ️  Created new tab: '{OUTPUT_TAB}'")
-
-    ws.clear()
-    ws.update(rows, value_input_option="USER_ENTERED")
-    print(f"✅ Written {len(rows) - 1} data rows to '{OUTPUT_TAB}'")
-
-# ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    print("🔗 Connecting to Google Sheets...")
-    client = get_sheet_client(SCOPES)
-    spreadsheet = client.open(SPREADSHEET_NAME)
-    print(f"   Opened: '{SPREADSHEET_NAME}'")
 
-    keyword_pairs = read_keywords(spreadsheet)
+    run_id_str = os.environ.get("SAAS_RUN_ID")
+    if not run_id_str:
+        raise ValueError("SAAS_RUN_ID not set")
+    run_id = int(run_id_str)
+
+    keyword_pairs = [
+    {
+        "keyword": row["keyword"],
+        "country": row["country_code"],
+    }
+    for row in get_run_keywords(run_id)
+    ]
+
     if not keyword_pairs:
         raise ValueError("❌ No valid keyword/country pairs found.")
 
     # Deduplicate: same keyword + same country = one search
     seen = set()
     unique_pairs = []
+    all_related_rows = []
     for pair in keyword_pairs:
         key = (pair["keyword"].lower(), pair["country"])
         if key not in seen:
@@ -258,14 +235,6 @@ def main():
     print(f"   Unique keyword×country pairs: {len(unique_pairs)}")
     print(f"   Est. time: ~{round(len(unique_pairs) * REQUEST_DELAY * 2 / 60, 1)} min\n")
 
-    output_rows = [[
-        "Keyword",
-        "Country_Code",
-        "Geo",
-        "Type",            # RELATED / SERP_DERIVED / ALSO_SEARCHED / EXPANDED
-        "Related_Query",
-        "Source",          # brave_related / brave_title / brave_infobox / brave_{mod}
-    ]]
 
     total_fetched = 0
 
@@ -280,33 +249,32 @@ def main():
 
         if not queries:
             print(f"     ⚠️  No related searches found")
-            output_rows.append([kw, country, geo, "NO_DATA", "", ""])
             continue
 
-        for q in queries:
-            output_rows.append([
-                kw,
-                country,
-                geo,
-                q["type"],
-                q["query"],
-                q["source"],
-            ])
+        for idx,q in enumerate(queries, start=1):
+            all_related_rows.append({
+                "keyword": kw,
+                "country_code": country,
+                "type": q["type"],
+                "position": idx ,
+                "query": q["query"],
+                "source": q["source"],
+            })            
             total_fetched += 1
 
         # Show sample
         sample = [q["query"] for q in queries[:3]]
         print(f"     ✅ {len(queries)} queries found → e.g. {sample}")
-
-    # Write results
-    print(f"\n📝 Writing results to sheet...")
-    write_results(spreadsheet, output_rows)
+    
+    save_related_searches(run_id, all_related_rows)
+    
 
     print(f"\n📊 SUMMARY")
     print(f"   Keyword/country pairs processed : {len(unique_pairs)}")
     print(f"   Total related queries fetched   : {total_fetched}")
-    print(f"   Rows written to sheet           : {len(output_rows) - 1}")
-    print(f"\n✅ Done — check '{OUTPUT_TAB}' tab in '{SPREADSHEET_NAME}'")
-
+    print(f"   Rows processed                  : {len(all_related_rows)}")
+    print("\nSample related queries:")
+    for row in all_related_rows[:3]:
+        print(row)
 if __name__ == "__main__":
     main()
