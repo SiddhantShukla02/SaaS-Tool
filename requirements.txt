@@ -1,5 +1,6 @@
 # Web UI
 streamlit==1.40.0
+streamlit-autorefresh==1.0.1
 
 # Queue backend (production)
 rq==1.16.2
@@ -16,4 +17,6 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 trafilatura==1.12.2
 
-streamlit-autorefresh==1.0.1
+# Postgres + R2 storage
+psycopg2-binary==2.9.10
+boto3==1.35.99
