@@ -243,6 +243,7 @@ def progress_for_run(run_id: int) -> dict:
             "stage_2_context":   ("done",    "failed",  "pending", "pending"),
             "stage_3_blog":      ("done",    "done",    "failed",  "pending"),
             "stage_4_bank":      ("done",    "done",    "done",    "failed"),
+            "stage_5_drafts":    ("done",    "done",    "done",    "done"),
         }.get(stage, ("pending",) * 4)
     else:
         marker = STATE_TO_PROGRESS.get(status, ("pending",) * 4)

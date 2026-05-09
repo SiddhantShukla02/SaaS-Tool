@@ -18,6 +18,7 @@ Env vars:
 
 import os
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # Set page config FIRST — before any other st.* call
 st.set_page_config(
@@ -260,10 +261,20 @@ def render_run_detail(run_id: int):
                 st.rerun()
 
     elif run["status"] == db.STATUS_FAILED:
-        st.error(f"Failed at: {run.get('failed_at_stage', 'unknown')}")
+        failed_stage = run.get("failed_at_stage", "unknown")
+
+        if failed_stage == "stage_5_drafts":
+            st.warning(
+                "Platform draft generation failed. "
+                "Your blog and question bank are still available."
+            )
+        else:
+            st.error(f"Failed at: {failed_stage}")
+
         if run.get("error_message"):
             with st.expander("Error message"):
                 st.code(run["error_message"])
+
         if st.button("🔁 Retry failed stage", type="primary"):
             try:
                 orchestrator.retry_failed_stage(run_id)
@@ -309,10 +320,11 @@ def render_run_detail(run_id: int):
             st.warning("Stop requested. The current cell may finish, but no further cells/stages will start.")
             st.rerun()
             
-        # Auto-refresh while running
-        import time as _time
-        _time.sleep(2)
-        st.rerun()
+        # Auto-refresh while running without blocking Streamlit rendering.
+        st_autorefresh(
+            interval=2000,
+            key=f"run-{run_id}-autorefresh",
+        )
 
     # ── Currently running stage ──
     running_exec = next((e for e in execs if e["status"] == "running"), None)

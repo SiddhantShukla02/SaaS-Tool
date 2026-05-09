@@ -26,6 +26,49 @@ if str(ROOT) not in sys.path:
 
 CELLS_DIR = Path(__file__).parent / "cells"
 
+class LiveLogCapture(io.StringIO):
+    """
+    Captures cell stdout while streaming complete lines to progress_cb.
+
+    progress_cb may print to stdout itself, so callback emission is routed
+    back to the original stdout to avoid recursive capture.
+    """
+
+    def __init__(self, cell_file: str, progress_cb: Callable[[str], None] | None):
+        super().__init__()
+        self.cell_file = cell_file
+        self.progress_cb = progress_cb
+        self._buffer = ""
+        self._outer_stdout = sys.stdout
+
+    def _emit_progress(self, line: str):
+        if not self.progress_cb:
+            return
+
+        with contextlib.redirect_stdout(self._outer_stdout):
+            self.progress_cb(f"[{self.cell_file}] {line}")
+
+    def write(self, text: str) -> int:
+        written = super().write(text)
+
+        if self.progress_cb:
+            self._buffer += text
+
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                line = line.strip()
+
+                if line:
+                    self._emit_progress(line)
+
+        return written
+
+    def flush_remaining(self):
+        line = self._buffer.strip()
+        if line:
+            self._emit_progress(line)
+        self._buffer = ""
+        
 
 def _run_cell(cell_file: str, progress_cb: Callable[[str], None] | None = None) -> str:
     """
@@ -48,8 +91,8 @@ def _run_cell(cell_file: str, progress_cb: Callable[[str], None] | None = None) 
         "__file__": str(path),
     }
 
-    # Capture stdout for the activity log
-    captured = io.StringIO()
+    # Capture stdout for stage logs while streaming lines live to the UI.
+    captured = LiveLogCapture(cell_file, progress_cb)
 
     if progress_cb:
         progress_cb(f"▶ started {cell_file}")
@@ -57,14 +100,10 @@ def _run_cell(cell_file: str, progress_cb: Callable[[str], None] | None = None) 
     with contextlib.redirect_stdout(captured):
         exec(code, namespace)
 
+    captured.flush_remaining()
     output = captured.getvalue()
 
     if progress_cb:
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-
-        for line in lines[-25:]:
-            progress_cb(f"[{cell_file}] {line}")
-
         progress_cb(f"✅ finished {cell_file}")
 
     return output
@@ -103,7 +142,7 @@ STAGE_CELLS = {
     ],
     "stage_5_drafts": [
         "cell_01_env_config.py",
-        "stage5_wrapper.py",
+        "cell_37_platform_drafts.py",
     ],
 }
 

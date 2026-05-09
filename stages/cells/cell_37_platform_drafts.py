@@ -643,7 +643,7 @@ def generate_substack_drafts(bank: list, blog_ref: str,
 
 print("\n" + "═" * 65)
 print("  PLATFORM DRAFT GENERATOR")
-print("  Generates Quora + Reddit + Substack drafts from question bank")
+print("  Generates selected platform drafts from question bank")
 print("═" * 65)
 
 run_id_raw = os.getenv("RUN_ID")
@@ -670,127 +670,151 @@ else:
     print(f"    Forum voice data   : {len(forum_voice)} chars")
     print(f"    Existing blog ref  : {len(blog_ref)} chars")
 
-    # Decide what to generate based on bank size
+    # Decide what to generate based on selected platform mode
+    platform_mode = os.environ.get("SAAS_PLATFORM", "all").strip().lower()
+    valid_platform_modes = {"quora", "reddit", "substack", "all"}
+
+    if platform_mode not in valid_platform_modes:
+        raise RuntimeError(f"Invalid SAAS_PLATFORM: {platform_mode}")
+
+    print(f"\n  Platform mode: {platform_mode}")
+
     bank_size = len(bank)
     quora_limit    = min(30, bank_size)
     reddit_limit   = min(15, max(5, bank_size // 4))
     substack_limit = min(6, max(2, bank_size // 20))
 
+    quora_drafts = []
+    reddit_drafts = []
+    substack_drafts = []
+
     # ══ QUORA ══
-    print(f"\n  ─── Generating Quora drafts (target {quora_limit}) ───")
-    quora_drafts = generate_quora_drafts(
-        bank, forum_voice, blog_ref, limit=quora_limit,
-    )
-    if quora_drafts:
-        quora_r2_key = f"outputs/{run_id}/quora_drafts.json"
-
-        r2_put_text(
-            quora_r2_key,
-            json.dumps(quora_drafts, ensure_ascii=False, default=str),
+    if platform_mode in ("quora", "all"):
+        print(f"\n  ─── Generating Quora drafts (target {quora_limit}) ───")
+        quora_drafts = generate_quora_drafts(
+            bank, forum_voice, blog_ref, limit=quora_limit,
         )
 
-        execute(
-            """
-            DELETE FROM generated_outputs
-            WHERE run_id = %s
-            AND output_type = %s
-            """,
-            (run_id, "quora_drafts"),
-        )
+        if quora_drafts:
+            quora_r2_key = f"outputs/{run_id}/quora_drafts.json"
 
-        execute(
-            """
-            INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (
-                run_id,
-                "quora_drafts",
+            r2_put_text(
                 quora_r2_key,
-                Json({"count": len(quora_drafts)}),
-            ),
-        )
+                json.dumps(quora_drafts, ensure_ascii=False, default=str),
+            )
 
-        print(f"  ✅ {len(quora_drafts)} Quora drafts saved → {quora_r2_key}")
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "quora_drafts"),
+            )
+
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "quora_drafts",
+                    quora_r2_key,
+                    Json({"count": len(quora_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(quora_drafts)} Quora drafts saved → {quora_r2_key}")
+    else:
+        print("  ⏭️  Skipping Quora drafts")
 
     # ══ REDDIT ══
-    print(f"\n  ─── Generating Reddit drafts (target {reddit_limit}) ───")
-    reddit_drafts = generate_reddit_drafts(
-        bank, forum_voice, specialty, limit=reddit_limit,
-    )
-    if reddit_drafts:
-        reddit_r2_key = f"outputs/{run_id}/reddit_drafts.json"
-
-        r2_put_text(
-            reddit_r2_key,
-            json.dumps(reddit_drafts, ensure_ascii=False, default=str),
+    if platform_mode in ("reddit", "all"):
+        print(f"\n  ─── Generating Reddit drafts (target {reddit_limit}) ───")
+        reddit_drafts = generate_reddit_drafts(
+            bank, forum_voice, specialty, limit=reddit_limit,
         )
 
-        execute(
-            """
-            DELETE FROM generated_outputs
-            WHERE run_id = %s
-            AND output_type = %s
-            """,
-            (run_id, "reddit_drafts"),
-        )
+        if reddit_drafts:
+            reddit_r2_key = f"outputs/{run_id}/reddit_drafts.json"
 
-        execute(
-            """
-            INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (
-                run_id,
-                "reddit_drafts",
+            r2_put_text(
                 reddit_r2_key,
-                Json({"count": len(reddit_drafts)}),
-            ),
-        )
+                json.dumps(reddit_drafts, ensure_ascii=False, default=str),
+            )
 
-        print(f"  ✅ {len(reddit_drafts)} Reddit drafts saved → {reddit_r2_key}")
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "reddit_drafts"),
+            )
 
-        no_sub = sum(1 for d in reddit_drafts if not d["Suggested_Subreddit"])
-        if no_sub:
-            print(f"  ⚠️  {no_sub} drafts have no suggested subreddit "
-                  f"(SUBREDDIT_ALLOWLIST in config_repurpose.py is empty)")
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "reddit_drafts",
+                    reddit_r2_key,
+                    Json({"count": len(reddit_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(reddit_drafts)} Reddit drafts saved → {reddit_r2_key}")
+
+            no_sub = sum(1 for d in reddit_drafts if not d["Suggested_Subreddit"])
+            if no_sub:
+                print(f"  ⚠️  {no_sub} drafts have no suggested subreddit "
+                      f"(SUBREDDIT_ALLOWLIST in config_repurpose.py is empty)")
+    else:
+        print("  ⏭️  Skipping Reddit drafts")
 
     # ══ SUBSTACK ══
-    print(f"\n  ─── Generating Substack essays (target {substack_limit}) ───")
-    substack_drafts = generate_substack_drafts(
-        bank, blog_ref, max_essays=substack_limit,
-    )
-    if substack_drafts:
-        substack_r2_key = f"outputs/{run_id}/substack_drafts.json"
-
-        r2_put_text(
-            substack_r2_key,
-            json.dumps(substack_drafts, ensure_ascii=False, default=str),
+    if platform_mode in ("substack", "all"):
+        print(f"\n  ─── Generating Substack essays (target {substack_limit}) ───")
+        substack_drafts = generate_substack_drafts(
+            bank, blog_ref, max_essays=substack_limit,
         )
 
-        execute(
-            """
-            DELETE FROM generated_outputs
-            WHERE run_id = %s
-            AND output_type = %s
-            """,
-            (run_id, "substack_drafts"),
-        )
+        if substack_drafts:
+            substack_r2_key = f"outputs/{run_id}/substack_drafts.json"
 
-        execute(
-            """
-            INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (
-                run_id,
-                "substack_drafts",
+            r2_put_text(
                 substack_r2_key,
-                Json({"count": len(substack_drafts)}),
-            ),
-        )
+                json.dumps(substack_drafts, ensure_ascii=False, default=str),
+            )
 
-        print(f"  ✅ {len(substack_drafts)} Substack essays saved → {substack_r2_key}")
+            execute(
+                """
+                DELETE FROM generated_outputs
+                WHERE run_id = %s
+                AND output_type = %s
+                """,
+                (run_id, "substack_drafts"),
+            )
+
+            execute(
+                """
+                INSERT INTO generated_outputs (run_id, output_type, r2_key, metadata_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    "substack_drafts",
+                    substack_r2_key,
+                    Json({"count": len(substack_drafts)}),
+                ),
+            )
+
+            print(f"  ✅ {len(substack_drafts)} Substack essays saved → {substack_r2_key}")
+    else:
+        print("  ⏭️  Skipping Substack drafts")
 
     # ── Summary ──
     print("\n" + "═" * 65)
