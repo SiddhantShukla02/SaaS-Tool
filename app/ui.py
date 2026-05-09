@@ -17,6 +17,8 @@ Env vars:
 """
 
 import os
+import re
+
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -222,29 +224,69 @@ def render_run_detail(run_id: int):
 
         selected_from_serp = []
 
-        for row in serp_rows:
-            label = f"{row['rank']}. {row['url']}"
-            checked = st.checkbox(label, key=f"serp-url-{row['id']}")
-            if checked:
-                selected_from_serp.append(row["url"])
+        if serp_rows:
+            export_lines = []
+            grouped_serp_rows = {}
+
+            for row in serp_rows:
+                group_key = (row["keyword"], row["country_code"])
+                grouped_serp_rows.setdefault(group_key, []).append(row)
+
+            for (keyword, country_code), rows in grouped_serp_rows.items():
+                if export_lines:
+                    export_lines.append("")
+
+                export_lines.append(f"# {keyword} | {country_code}")
+
+                for row in rows:
+                    export_lines.append(row["url"])
+
+            st.download_button(
+                "⬇️ Download all SERP URLs as TXT",
+                data="\n".join(export_lines),
+                file_name=f"run_{run_id}_serp_urls.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+            for (keyword, country_code), rows in grouped_serp_rows.items():
+                st.markdown(f"**{keyword} · {country_code.upper()}**")
+
+                for row in rows:
+                    label = f"{row['rank']}. {row['url']}"
+                    checked = st.checkbox(label, key=f"serp-url-{row['id']}")
+                    if checked:
+                        selected_from_serp.append(row["url"])
+
+                st.divider()
+        else:
+            st.info("No SERP URLs found. You can still paste manual URLs below.")
 
         manual_urls_raw = st.text_area(
             "Additional/manual URLs, one per line",
             placeholder="https://example.com/page-1\nhttps://example.com/page-2",
+            help="Paste approved URLs here after manual DA/relevance checks. One URL per line.",
+            key=f"manual-urls-{run_id}",
         )
+
         col_a, col_b = st.columns([1, 1])
         with col_a:
             if st.button("✓ URLs ready, run Stage 2 - Context build", type="primary",
                         use_container_width=True):
                 try:
+                    manual_urls = re.findall(
+                        r"https?://[^\s,]+",
+                        manual_urls_raw,
+                    )
+
                     manual_urls = [
-                        url.strip()
-                        for url in manual_urls_raw.splitlines()
+                        url.strip().rstrip(".,);]")
+                        for url in manual_urls
                         if url.strip()
                     ]
 
                     final_urls = list(dict.fromkeys(selected_from_serp + manual_urls))
-
+                    
                     if not final_urls:
                         st.error("Please select or enter at least one URL.")
                     else:

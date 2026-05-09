@@ -63,15 +63,33 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
         raise
 
 
-    from stages.runner import run_stage
+        from stages.runner import run_stage
     from app import orchestrator
     from app.repositories import state_repo as db
 
+    def safe_log(level: str, message: str):
+        """
+        Best-effort activity logging.
+
+        Pipeline execution should not fail just because the activity log
+        could not be written to Postgres/Neon.
+        """
+        try:
+            db.log(run_id, level, message[:1000])
+        except Exception as log_error:
+            print(
+                f"[run {run_id}] ⚠️ activity log write failed: "
+                f"{type(log_error).__name__}: {log_error}",
+                flush=True,
+            )
+
     def progress_cb(line: str):
         print(f"[run {run_id}] {line}", flush=True)
-        db.log(run_id, "info", line[:1000])
-    db.log(run_id, "info", f"──────── {stage_name} ────────")
-    db.log(run_id, "info", f"[worker] starting {stage_name}")
+        safe_log("info", line)
+
+
+    safe_log("info", f"──────── {stage_name} ────────")
+    safe_log("info", f"[worker] starting {stage_name}")
     print(f"[run {run_id}] [worker] starting {stage_name}", flush=True)
     exec_id = db.record_stage_start(run_id, stage_name)
 
@@ -83,7 +101,7 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
         result = run_stage(stage_name, run_id, progress_cb=progress_cb)
 
         if result["status"] == "cancelled":
-            db.log(run_id, "warn", f"[worker] stopped {stage_name} because run was cancelled")
+            safe_log("warn", f"[worker] stopped {stage_name} because run was cancelled")
             print(f"[run {run_id}] [worker] stopped {stage_name}: cancelled", flush=True)
 
             db.record_stage_finish(
@@ -97,7 +115,7 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
 
 
         if result["status"] == "failed":
-            db.log(run_id, "error", result.get("error", "Stage failed")[:1000])
+            safe_log("error", result.get("error", "Stage failed")[:1000])
             print(f"[run {run_id}] [worker] stage failed {stage_name}: {result.get('error')}", flush=True)
         db.record_stage_finish(
             exec_id, result["status"],
@@ -109,12 +127,12 @@ def execute_job(run_id: int, stage_name: str, job_params: dict):
         )
         level = "error" if result["status"] == "failed" else "info"
 
-        db.log(run_id, level, f"[worker] finished {stage_name}: {result['status']}")
+        safe_log(level, f"[worker] finished {stage_name}: {result['status']}")
         print(f"[run {run_id}] [worker] finished {stage_name}: {result['status']}", flush=True)
     except Exception as e:
         import traceback
         err = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}"
-        db.log(run_id, "error", err[:1000])
+        safe_log("error", err[:1000])
         print(f"[run {run_id}] [worker] failed {stage_name}: {err}", flush=True)
         db.record_stage_finish(exec_id, "failed", error_message=err)
         orchestrator.on_stage_finished(run_id, stage_name, "failed", err)
