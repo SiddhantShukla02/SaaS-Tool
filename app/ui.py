@@ -15,9 +15,10 @@ Env vars:
     REDIS_URL              — if backend is 'rq'
     SAAS_ALLOW_NO_AUTH=1   — bypass login for local dev
 """
-
+import io
 import os
 import re
+import json
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -33,7 +34,17 @@ st.set_page_config(
 from app import orchestrator, auth          # noqa: E402
 from app.repositories import state_repo as db
 from app.repositories.run_repo import get_run_country_codes
-from app.repositories.search_repo import get_serp_urls_for_run, save_selected_urls
+from app.storage import r2_get_text
+from app.repositories.search_repo import (
+    get_paa_questions_for_run,
+    get_serp_urls_for_run,
+    save_selected_urls,
+    get_selected_urls,
+)
+from app.repositories.output_repo import (
+    get_question_bank_output,
+    get_platform_draft_output,
+)
 
 # Require login
 auth.require_auth()
@@ -172,7 +183,23 @@ def render_run_detail(run_id: int):
         )
 
         if blog_row:
-            st.markdown(f"**Blog:** `{blog_row['r2_key']}`")
+            blog_r2_key = blog_row["r2_key"]
+            st.markdown(f"**Blog:** `{blog_r2_key}`")
+
+            try:
+                final_blog_text = r2_get_text(blog_r2_key)
+
+                st.download_button(
+                    label="⬇️ Download final blog (.txt)",
+                    data=final_blog_text,
+                    file_name=f"run_{run['id']}_final_blog.txt",
+                    mime="text/plain",
+                    use_container_width=False,
+                    key=f"download-final-blog-{run['id']}",
+                )
+
+            except Exception as e:
+                st.warning(f"Blog found in R2, but download failed: {e}")
         else:
             st.markdown("**Blog:** *(not ready yet)*")
 
@@ -368,6 +395,315 @@ def render_run_detail(run_id: int):
             key=f"run-{run_id}-autorefresh",
         )
 
+    # ── Downloads panel ──
+    st.markdown("#### Downloads")
+
+    download_col_paa, download_col_urls, download_col_qb, = st.columns(3)
+
+    with download_col_paa:
+        paa_rows = get_paa_questions_for_run(run_id)
+
+        if paa_rows:
+            paa_lines = []
+
+            for row in paa_rows:
+                paa_lines.append(
+                    f"# {row['keyword']} | {str(row['country_code']).upper()} | PAA {row['position']}"
+                )
+                paa_lines.append(f"Question: {row['question']}")
+
+                if row.get("snippet"):
+                    paa_lines.append(f"Snippet: {row['snippet']}")
+
+                if row.get("source"):
+                    paa_lines.append(f"Source: {row['source']}")
+
+                if row.get("source_url"):
+                    paa_lines.append(f"Source URL: {row['source_url']}")
+
+                paa_lines.append("")
+
+            st.download_button(
+                label="⬇️ Download PAA",
+                data="\n".join(paa_lines),
+                file_name=f"run_{run_id}_paa_questions.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key=f"download-paa-{run_id}",
+            )
+        else:
+            st.button(
+                "⬇️ Download PAA",
+                disabled=True,
+                use_container_width=True,
+                key=f"download-paa-disabled-{run_id}",
+            )
+
+    with download_col_urls:
+        selected_urls = get_selected_urls(run_id)
+
+        if selected_urls:
+            selected_url_lines = selected_urls
+            # selected_url_lines = [
+            #     f"# Selected URLs for Run #{run_id}",
+            #     "",
+            # ]
+
+            # for position, url in enumerate(selected_urls, start=1):
+            #     selected_url_lines.append(f"{url}")
+
+            st.download_button(
+                label="⬇️ Download selected URLs",
+                data="\n".join(selected_url_lines),
+                file_name=f"run_{run_id}_selected_urls.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key=f"download-selected-urls-{run_id}",
+            )
+        else:
+            st.button(
+                "⬇️ Download selected URLs",
+                disabled=True,
+                use_container_width=True,
+                key=f"download-selected-urls-disabled-{run_id}",
+            )
+
+    with download_col_qb:
+        question_bank_row = get_question_bank_output(run_id)
+
+        if question_bank_row:
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import Font, PatternFill, Alignment
+                from openpyxl.utils import get_column_letter
+
+                question_bank_raw = r2_get_text(question_bank_row["r2_key"])
+                question_bank_payload = json.loads(question_bank_raw or "{}")
+
+                headers = question_bank_payload.get("headers", [])
+                rows = question_bank_payload.get("rows", [])
+
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.title = "Question Bank"
+
+                if headers:
+                    worksheet.append(headers)
+
+                for row_values in rows:
+                    worksheet.append([
+                        "" if value is None else value
+                        for value in row_values
+                    ])
+
+                header_fill = PatternFill(
+                    fill_type="solid",
+                    fgColor="D9EAF7",
+                )
+
+                for cell in worksheet[1]:
+                    cell.font = Font(bold=True)
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                        wrap_text=True,
+                    )
+
+                worksheet.freeze_panes = "A2"
+                worksheet.auto_filter.ref = worksheet.dimensions
+
+                text_heavy_columns = {
+                    "Question",
+                    "Original_Fragment",
+                    "Competitor_Answer_Ref",
+                }
+
+                for column_cells in worksheet.columns:
+                    column_letter = get_column_letter(column_cells[0].column)
+                    header_value = str(column_cells[0].value or "")
+
+                    if header_value in text_heavy_columns:
+                        worksheet.column_dimensions[column_letter].width = 45
+                    else:
+                        max_length = max(
+                            len(str(cell.value or ""))
+                            for cell in column_cells[:100]
+                        )
+                        worksheet.column_dimensions[column_letter].width = min(
+                            max(max_length + 2, 12),
+                            28,
+                        )
+
+                    for cell in column_cells:
+                        cell.alignment = Alignment(
+                            vertical="top",
+                            wrap_text=True,
+                        )
+
+                for row in worksheet.iter_rows(min_row=2):
+                    worksheet.row_dimensions[row[0].row].height = 45
+
+                output = io.BytesIO()
+                workbook.save(output)
+                output.seek(0)
+
+                st.download_button(
+                    label="⬇️ Download Question Bank",
+                    data=output.getvalue(),
+                    file_name=f"run_{run_id}_question_bank.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"download-question-bank-{run_id}",
+                )
+
+            except Exception as e:
+                st.button(
+                    "⬇️ Download Question Bank",
+                    disabled=True,
+                    use_container_width=True,
+                    key=f"download-question-bank-error-{run_id}",
+                )
+                st.warning(f"Question bank found, but download failed: {e}")
+        else:
+            st.button(
+                "⬇️ Download Question Bank",
+                disabled=True,
+                use_container_width=True,
+                key=f"download-question-bank-disabled-{run_id}",
+            )
+
+    def build_platform_text(output_type: str, r2_key: str) -> str:
+        raw_text = r2_get_text(r2_key)
+        drafts = json.loads(raw_text or "[]")
+
+        output_labels = {
+            "quora_drafts": "QUORA DRAFTS",
+            "reddit_drafts": "REDDIT DRAFTS",
+            "substack_drafts": "SUBSTACK DRAFTS",
+        }
+
+        lines = [
+            f"# {output_labels.get(output_type, output_type.upper())} — Run #{run_id}",
+            f"R2 key: {r2_key}",
+            "",
+        ]
+
+        if not drafts:
+            lines.append("(No drafts found in this output.)")
+            return "\n".join(lines)
+
+        for index, draft in enumerate(drafts, start=1):
+            lines.extend([
+                "=" * 80,
+                f"Draft #{index}",
+                "=" * 80,
+            ])
+
+            if output_type == "quora_drafts":
+                lines.append(f"Question: {draft.get('Question', '')}")
+                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
+                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
+                lines.append(f"Priority: {draft.get('Priority', '')}")
+                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
+                lines.append("")
+                lines.append(draft.get("Draft_Markdown", ""))
+
+            elif output_type == "reddit_drafts":
+                lines.append(f"Question: {draft.get('Question', '')}")
+                lines.append(f"Suggested Subreddit: {draft.get('Suggested_Subreddit', '')}")
+                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
+                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
+                lines.append(f"Priority: {draft.get('Priority', '')}")
+                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
+                lines.append("")
+                lines.append(draft.get("Draft_Markdown", ""))
+
+            elif output_type == "substack_drafts":
+                lines.append(f"Headline: {draft.get('Headline', '')}")
+                lines.append(f"Theme: {draft.get('Theme', '')}")
+                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
+                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
+                lines.append(f"Questions Covered: {draft.get('Questions_Covered', '')}")
+                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
+                lines.append("")
+                lines.append(draft.get("Draft_Markdown", ""))
+
+            else:
+                lines.append(json.dumps(draft, ensure_ascii=False, indent=2))
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def render_platform_download(
+        label: str,
+        platform: str,
+        output_type: str,
+        file_suffix: str,
+        key_suffix: str,
+    ) -> None:
+        output_row = get_platform_draft_output(run_id, platform)
+
+        if output_row:
+            try:
+                export_text = build_platform_text(output_type, output_row["r2_key"])
+
+                st.download_button(
+                    label=label,
+                    data=export_text,
+                    file_name=f"run_{run_id}_{file_suffix}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                    key=f"download-{key_suffix}-{run_id}",
+                )
+            except Exception as e:
+                st.button(
+                    label,
+                    disabled=True,
+                    use_container_width=True,
+                    key=f"download-{key_suffix}-error-{run_id}",
+                )
+                st.warning(f"{label.replace('⬇️ ', '')} found, but download failed: {e}")
+        else:
+            st.button(
+                label,
+                disabled=True,
+                use_container_width=True,
+                key=f"download-{key_suffix}-disabled-{run_id}",
+            )
+
+    st.write("")
+
+    platform_col_quora, platform_col_reddit, platform_col_substack = st.columns(3)
+
+    with platform_col_quora:
+        render_platform_download(
+            label="⬇️ Download Quora",
+            platform="quora",
+            output_type="quora_drafts",
+            file_suffix="quora_drafts",
+            key_suffix="quora",
+        )
+
+    with platform_col_reddit:
+        render_platform_download(
+            label="⬇️ Download Reddit",
+            platform="reddit",
+            output_type="reddit_drafts",
+            file_suffix="reddit_drafts",
+            key_suffix="reddit",
+        )
+
+    with platform_col_substack:
+        render_platform_download(
+            label="⬇️ Download Substack",
+            platform="substack",
+            output_type="substack_drafts",
+            file_suffix="substack_drafts",
+            key_suffix="substack",
+        )
+
     # ── Currently running stage ──
     running_exec = next((e for e in execs if e["status"] == "running"), None)
 
@@ -539,11 +875,13 @@ def render_dashboard():
 
 if run_view:
     try:
-        render_run_detail(int(run_view))
+        run_id_int = int(run_view)
     except ValueError:
         st.error(f"Invalid run id: {run_view}")
         if st.button("← Back to dashboard"):
             st.query_params.clear()
             st.rerun()
+    else:
+        render_run_detail(run_id_int)
 else:
     render_dashboard()
