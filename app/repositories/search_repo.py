@@ -158,6 +158,26 @@ def get_selected_urls(run_id: int) -> list[str]:
 
     return [r["url"] for r in rows]
 
+def get_paa_questions_for_run(run_id: int) -> list[dict]:
+    from app.database import fetch_all
+
+    return fetch_all(
+        """
+        SELECT
+            keyword,
+            country_code,
+            position,
+            question,
+            snippet,
+            source,
+            source_url
+        FROM paa_questions
+        WHERE run_id = %s
+        ORDER BY keyword ASC, country_code ASC, position ASC
+        """,
+        (run_id,),
+    )
+
 
 def insert_competitor_page(
     run_id: int,
