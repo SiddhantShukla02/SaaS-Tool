@@ -409,6 +409,7 @@ def render_run_detail(run_id: int):
     elif run["status"] in (db.STATUS_BLOG_READY, db.STATUS_BANK_READY,
                              db.STATUS_COMPLETE):
         col_bank, col_q, col_r, col_s = st.columns(4)
+
         with col_bank:
             if run["status"] == db.STATUS_BLOG_READY:
                 if st.button("📦 Build Question Bank", use_container_width=True):
@@ -416,19 +417,39 @@ def render_run_detail(run_id: int):
                     st.rerun()
             else:
                 st.write("✓ Question bank built")
+
         bank_ready = run["status"] in (db.STATUS_BANK_READY, db.STATUS_COMPLETE)
+
+        quora_action_label = (
+            "✍️ Regenerate Quora drafts"
+            if outputs_by_type.get("quora_drafts")
+            else "✍️ Generate Quora drafts"
+        )
+        reddit_action_label = (
+            "🟠 Regenerate Reddit drafts"
+            if outputs_by_type.get("reddit_drafts")
+            else "🟠 Generate Reddit drafts"
+        )
+        substack_action_label = (
+            "🔵 Regenerate Substack"
+            if outputs_by_type.get("substack_drafts")
+            else "🔵 Generate Substack"
+        )
+
         with col_q:
-            if st.button("✍️ Generate Quora drafts", use_container_width=True,
+            if st.button(quora_action_label, use_container_width=True,
                           disabled=not bank_ready):
                 orchestrator.start_platform_drafts(run_id, "quora")
                 st.rerun()
+
         with col_r:
-            if st.button("🟠 Generate Reddit drafts", use_container_width=True,
+            if st.button(reddit_action_label, use_container_width=True,
                           disabled=not bank_ready):
                 orchestrator.start_platform_drafts(run_id, "reddit")
                 st.rerun()
+
         with col_s:
-            if st.button("🔵 Generate Substack", use_container_width=True,
+            if st.button(substack_action_label, use_container_width=True,
                           disabled=not bank_ready):
                 orchestrator.start_platform_drafts(run_id, "substack")
                 st.rerun()
