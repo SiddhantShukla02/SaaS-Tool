@@ -33,7 +33,7 @@ st.set_page_config(
 
 from app import orchestrator, auth          # noqa: E402
 from app.repositories import state_repo as db
-from app.repositories.run_repo import get_run_country_codes
+from app.repositories.run_repo import get_run_country_codes, get_country_codes_for_runs
 from app.storage import r2_get_text
 from app.repositories.search_repo import (
     get_paa_questions_for_run,
@@ -115,6 +115,44 @@ def progress_bar_html(progress: dict) -> str:
         '</div>'
     )
 
+
+def progress_from_run_status(run: dict) -> dict:
+    status = run["status"]
+
+    state_to_progress = {
+        db.STATUS_DRAFT:              ("pending", "pending", "pending", "pending"),
+        db.STATUS_STAGE1_RUNNING:     ("active",  "pending", "pending", "pending"),
+        db.STATUS_STAGE2_RUNNING:     ("done",    "active",  "pending", "pending"),
+        db.STATUS_AWAITING_FINAL_URL: ("done",    "done",    "pending", "pending"),
+        db.STATUS_STAGE3_RUNNING:     ("done",    "done",    "active",  "pending"),
+        db.STATUS_BLOG_READY:         ("done",    "done",    "done",    "pending"),
+        db.STATUS_BANK_RUNNING:       ("done",    "done",    "done",    "active"),
+        db.STATUS_BANK_READY:         ("done",    "done",    "done",    "done"),
+        db.STATUS_QUORA_RUNNING:      ("done",    "done",    "done",    "done"),
+        db.STATUS_REDDIT_RUNNING:     ("done",    "done",    "done",    "done"),
+        db.STATUS_SUBSTACK_RUNNING:   ("done",    "done",    "done",    "done"),
+        db.STATUS_COMPLETE:           ("done",    "done",    "done",    "done"),
+        db.STATUS_CANCELLED:          ("pending", "pending", "pending", "pending"),
+    }
+
+    if status == db.STATUS_FAILED:
+        failed_at_stage = run.get("failed_at_stage", "")
+        marker = {
+            "stage_1_serp_paa":  ("failed",  "pending", "pending", "pending"),
+            "stage_2_context":   ("done",    "failed",  "pending", "pending"),
+            "stage_3_blog":      ("done",    "done",    "failed",  "pending"),
+            "stage_4_bank":      ("done",    "done",    "done",    "failed"),
+            "stage_5_drafts":    ("done",    "done",    "done",    "done"),
+        }.get(failed_at_stage, ("pending",) * 4)
+    else:
+        marker = state_to_progress.get(status, ("pending",) * 4)
+
+    return {
+        "stage_1": marker[0],
+        "stage_2": marker[1],
+        "stage_3": marker[2],
+        "stage_4": marker[3],
+    }
 
 # ─────────────────────────────────────────────────────────────
 # Header
@@ -981,19 +1019,22 @@ def render_dashboard():
         st.info("No runs yet. Click 'Start new run' above.")
         return
 
+    run_ids = [run["id"] for run in runs]
+    country_codes_by_run_id = get_country_codes_for_runs(run_ids)
+
     for run in runs:
         with st.container():
             cols = st.columns([4, 1.5, 1])
             with cols[0]:
                 st.markdown(f"**{run['primary_keyword']}**")
-                country_codes = get_run_country_codes(run["id"])
+                country_codes = country_codes_by_run_id.get(run["id"], [])
 
                 st.caption(
                     f"Run #{run['id']} · {', '.join(country_codes) or '—'} · "
                     f"{str(run['created_at']).replace('T', ' ')[:16]}"
                 )
                 st.markdown(
-                    progress_bar_html(orchestrator.progress_for_run(run['id'])),
+                    progress_bar_html(progress_from_run_status(run)),
                     unsafe_allow_html=True,
                 )
             with cols[1]:
@@ -1004,8 +1045,7 @@ def render_dashboard():
                     st.query_params["run"] = str(run["id"])
                     st.rerun()
             st.markdown("---")
-
-
+            
 # ─────────────────────────────────────────────────────────────
 # Route
 # ─────────────────────────────────────────────────────────────

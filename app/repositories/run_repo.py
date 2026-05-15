@@ -56,3 +56,28 @@ def get_run_country_codes(run_id: int) -> list[str]:
     )
 
     return [row["country_code"] for row in rows]
+
+
+def get_country_codes_for_runs(run_ids: list[int]) -> dict[int, list[str]]:
+    if not run_ids:
+        return {}
+
+    rows = fetch_all(
+        """
+        SELECT run_id, country_code
+        FROM (
+            SELECT DISTINCT run_id, country_code
+            FROM run_keywords
+            WHERE run_id = ANY(%s::int[])
+        ) unique_run_countries
+        ORDER BY run_id ASC, country_code ASC
+        """,
+        (run_ids,),
+    )
+
+    country_codes_by_run_id: dict[int, list[str]] = {}
+
+    for row in rows:
+        country_codes_by_run_id.setdefault(row["run_id"], []).append(row["country_code"])
+
+    return country_codes_by_run_id
