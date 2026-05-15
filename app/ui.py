@@ -42,6 +42,7 @@ from app.repositories.search_repo import (
     get_selected_urls,
 )
 from app.repositories.output_repo import (
+    get_generated_outputs,
     get_question_bank_output,
     get_platform_draft_output,
 )
@@ -195,6 +196,22 @@ def render_run_detail(run_id: int):
             st.rerun()
         return
 
+    output_rows = get_generated_outputs(
+        run_id,
+        [
+            "blog",
+            "question_bank",
+            "quora_drafts",
+            "reddit_drafts",
+            "substack_drafts",
+        ],
+    )
+
+    outputs_by_type = {
+        row["output_type"]: row
+        for row in output_rows
+    }
+
     if st.button("← Back to dashboard"):
         st.query_params.clear()
         st.rerun()
@@ -218,18 +235,7 @@ def render_run_detail(run_id: int):
     with m2:
         st.metric("Run ID", f"#{run['id']}")
     with m3:
-        from app.database import fetch_one
-
-        blog_row = fetch_one(
-            """
-            SELECT r2_key
-            FROM generated_outputs
-            WHERE run_id = %s AND output_type = %s
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (run["id"], "blog"),
-        )
+        blog_row = outputs_by_type.get("blog")
 
         if blog_row:
             blog_r2_key = blog_row["r2_key"]
@@ -254,7 +260,7 @@ def render_run_detail(run_id: int):
 
     # Progress
     st.markdown(
-        progress_bar_html(orchestrator.progress_for_run(run_id)),
+        progress_bar_html(progress_from_run_status(run)),
         unsafe_allow_html=True,
     )
 
@@ -584,7 +590,7 @@ def render_run_detail(run_id: int):
             )
 
     with download_col_qb:
-        question_bank_row = get_question_bank_output(run_id)
+        question_bank_row = outputs_by_type.get("question_bank")
 
         if question_bank_row:
             try:
@@ -829,7 +835,7 @@ def render_run_detail(run_id: int):
         file_suffix: str,
         key_suffix: str,
     ) -> None:
-        output_row = get_platform_draft_output(run_id, platform)
+        output_row = outputs_by_type.get(output_type)
 
         if output_row:
             try:
