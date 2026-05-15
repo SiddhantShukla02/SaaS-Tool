@@ -404,33 +404,99 @@ def render_run_detail(run_id: int):
         paa_rows = get_paa_questions_for_run(run_id)
 
         if paa_rows:
-            paa_lines = []
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import Font, PatternFill, Alignment
+                from openpyxl.utils import get_column_letter
 
-            for row in paa_rows:
-                paa_lines.append(
-                    f"# {row['keyword']} | {str(row['country_code']).upper()} | PAA {row['position']}"
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.title = "PAA Questions"
+
+                headers = [
+                    "Keyword",
+                    "Country Code",
+                    "Position",
+                    "Question",
+                    "Snippet",
+                    "Source",
+                    "Source URL",
+                ]
+
+                worksheet.append(headers)
+
+                for row in paa_rows:
+                    worksheet.append([
+                        row.get("keyword", ""),
+                        str(row.get("country_code", "") or "").upper(),
+                        row.get("position", ""),
+                        row.get("question", ""),
+                        row.get("snippet", ""),
+                        row.get("source", ""),
+                        row.get("source_url", ""),
+                    ])
+
+                header_fill = PatternFill(
+                    fill_type="solid",
+                    fgColor="D9EAF7",
                 )
-                paa_lines.append(f"Question: {row['question']}")
 
-                if row.get("snippet"):
-                    paa_lines.append(f"Snippet: {row['snippet']}")
+                for cell in worksheet[1]:
+                    cell.font = Font(bold=True)
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                        wrap_text=True,
+                    )
 
-                if row.get("source"):
-                    paa_lines.append(f"Source: {row['source']}")
+                worksheet.freeze_panes = "A2"
+                worksheet.auto_filter.ref = worksheet.dimensions
 
-                if row.get("source_url"):
-                    paa_lines.append(f"Source URL: {row['source_url']}")
+                column_widths = {
+                    "A": 28,  # Keyword
+                    "B": 14,  # Country Code
+                    "C": 10,  # Position
+                    "D": 55,  # Question
+                    "E": 90,  # Snippet
+                    "F": 28,  # Source
+                    "G": 90,  # Source URL
+                }
 
-                paa_lines.append("")
+                for column_letter, width in column_widths.items():
+                    worksheet.column_dimensions[column_letter].width = width
 
-            st.download_button(
-                label="⬇️ Download PAA",
-                data="\n".join(paa_lines),
-                file_name=f"run_{run_id}_paa_questions.txt",
-                mime="text/plain",
-                use_container_width=True,
-                key=f"download-paa-{run_id}",
-            )
+                for row_cells in worksheet.iter_rows():
+                    for cell in row_cells:
+                        cell.alignment = Alignment(
+                            vertical="top",
+                            wrap_text=True,
+                        )
+
+                for row_index in range(2, worksheet.max_row + 1):
+                    worksheet.row_dimensions[row_index].height = 60
+
+                output = io.BytesIO()
+                workbook.save(output)
+                output.seek(0)
+
+                st.download_button(
+                    label="⬇️ Download PAA",
+                    data=output.getvalue(),
+                    file_name=f"run_{run_id}_paa_questions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"download-paa-{run_id}",
+                )
+
+            except Exception as e:
+                st.button(
+                    "⬇️ Download PAA",
+                    disabled=True,
+                    use_container_width=True,
+                    key=f"download-paa-error-{run_id}",
+                )
+                st.warning(f"PAA found, but download failed: {e}")
         else:
             st.button(
                 "⬇️ Download PAA",
@@ -573,68 +639,139 @@ def render_run_detail(run_id: int):
                 key=f"download-question-bank-disabled-{run_id}",
             )
 
-    def build_platform_text(output_type: str, r2_key: str) -> str:
+    def build_platform_xlsx(output_type: str, r2_key: str) -> bytes:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
         raw_text = r2_get_text(r2_key)
         drafts = json.loads(raw_text or "[]")
 
-        output_labels = {
-            "quora_drafts": "QUORA DRAFTS",
-            "reddit_drafts": "REDDIT DRAFTS",
-            "substack_drafts": "SUBSTACK DRAFTS",
+        if isinstance(drafts, dict):
+            drafts = [drafts]
+
+        platform_sheet_names = {
+            "quora_drafts": "Quora Drafts",
+            "reddit_drafts": "Reddit Drafts",
+            "substack_drafts": "Substack Drafts",
         }
 
-        lines = [
-            f"# {output_labels.get(output_type, output_type.upper())} — Run #{run_id}",
-            f"R2 key: {r2_key}",
-            "",
-        ]
+        preferred_headers = {
+            "quora_drafts": [
+                "Question",
+                "Target_Country",
+                "Funnel_Stage",
+                "Priority",
+                "Word_Count",
+                "Draft_Markdown",
+            ],
+            "reddit_drafts": [
+                "Question",
+                "Suggested_Subreddit",
+                "Target_Country",
+                "Funnel_Stage",
+                "Priority",
+                "Word_Count",
+                "Draft_Markdown",
+            ],
+            "substack_drafts": [
+                "Headline",
+                "Theme",
+                "Target_Country",
+                "Funnel_Stage",
+                "Questions_Covered",
+                "Word_Count",
+                "Draft_Markdown",
+            ],
+        }
 
-        if not drafts:
-            lines.append("(No drafts found in this output.)")
-            return "\n".join(lines)
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = platform_sheet_names.get(output_type, "Platform Drafts")
 
-        for index, draft in enumerate(drafts, start=1):
-            lines.extend([
-                "=" * 80,
-                f"Draft #{index}",
-                "=" * 80,
-            ])
+        base_headers = preferred_headers.get(output_type, [])
 
-            if output_type == "quora_drafts":
-                lines.append(f"Question: {draft.get('Question', '')}")
-                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
-                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
-                lines.append(f"Priority: {draft.get('Priority', '')}")
-                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
-                lines.append("")
-                lines.append(draft.get("Draft_Markdown", ""))
+        extra_headers = []
+        for draft in drafts:
+            if isinstance(draft, dict):
+                for key in draft.keys():
+                    if key not in base_headers and key not in extra_headers:
+                        extra_headers.append(key)
 
-            elif output_type == "reddit_drafts":
-                lines.append(f"Question: {draft.get('Question', '')}")
-                lines.append(f"Suggested Subreddit: {draft.get('Suggested_Subreddit', '')}")
-                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
-                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
-                lines.append(f"Priority: {draft.get('Priority', '')}")
-                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
-                lines.append("")
-                lines.append(draft.get("Draft_Markdown", ""))
+        headers = base_headers + extra_headers
 
-            elif output_type == "substack_drafts":
-                lines.append(f"Headline: {draft.get('Headline', '')}")
-                lines.append(f"Theme: {draft.get('Theme', '')}")
-                lines.append(f"Target Country: {draft.get('Target_Country', '')}")
-                lines.append(f"Funnel Stage: {draft.get('Funnel_Stage', '')}")
-                lines.append(f"Questions Covered: {draft.get('Questions_Covered', '')}")
-                lines.append(f"Word Count: {draft.get('Word_Count', '')}")
-                lines.append("")
-                lines.append(draft.get("Draft_Markdown", ""))
+        if not headers:
+            headers = ["Draft"]
 
+        worksheet.append(headers)
+
+        for draft in drafts:
+            if isinstance(draft, dict):
+                worksheet.append([
+                    "" if draft.get(header) is None else draft.get(header)
+                    for header in headers
+                ])
             else:
-                lines.append(json.dumps(draft, ensure_ascii=False, indent=2))
+                worksheet.append([str(draft)])
 
-            lines.append("")
+        header_fill = PatternFill(
+            fill_type="solid",
+            fgColor="D9EAF7",
+        )
 
-        return "\n".join(lines)
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+        text_heavy_columns = {
+            "Question",
+            "Draft_Markdown",
+            "Questions_Covered",
+            "Suggested_Subreddit",
+            "Theme",
+            "Headline",
+        }
+
+        for column_cells in worksheet.columns:
+            column_letter = get_column_letter(column_cells[0].column)
+            header_value = str(column_cells[0].value or "")
+
+            if header_value == "Draft_Markdown":
+                worksheet.column_dimensions[column_letter].width = 90
+            elif header_value in text_heavy_columns:
+                worksheet.column_dimensions[column_letter].width = 45
+            else:
+                max_length = max(
+                    len(str(cell.value or ""))
+                    for cell in column_cells[:100]
+                )
+                worksheet.column_dimensions[column_letter].width = min(
+                    max(max_length + 2, 12),
+                    28,
+                )
+
+            for cell in column_cells:
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=True,
+                )
+
+        for row in worksheet.iter_rows(min_row=2):
+            worksheet.row_dimensions[row[0].row].height = 80
+
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+
+        return output.getvalue()
 
     def render_platform_download(
         label: str,
@@ -647,13 +784,13 @@ def render_run_detail(run_id: int):
 
         if output_row:
             try:
-                export_text = build_platform_text(output_type, output_row["r2_key"])
+                export_xlsx = build_platform_xlsx(output_type, output_row["r2_key"])
 
                 st.download_button(
                     label=label,
-                    data=export_text,
-                    file_name=f"run_{run_id}_{file_suffix}.txt",
-                    mime="text/plain",
+                    data=export_xlsx,
+                    file_name=f"run_{run_id}_{file_suffix}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key=f"download-{key_suffix}-{run_id}",
                 )
