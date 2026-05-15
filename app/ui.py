@@ -33,7 +33,7 @@ st.set_page_config(
 
 from app import orchestrator, auth          # noqa: E402
 from app.repositories import state_repo as db
-from app.repositories.run_repo import get_run_country_codes
+from app.repositories.run_repo import get_run_country_codes, get_country_codes_for_runs
 from app.storage import r2_get_text
 from app.repositories.search_repo import (
     get_paa_questions_for_run,
@@ -42,6 +42,7 @@ from app.repositories.search_repo import (
     get_selected_urls,
 )
 from app.repositories.output_repo import (
+    get_generated_outputs,
     get_question_bank_output,
     get_platform_draft_output,
 )
@@ -116,6 +117,55 @@ def progress_bar_html(progress: dict) -> str:
     )
 
 
+def progress_from_run_status(run: dict) -> dict:
+    status = run["status"]
+
+    state_to_progress = {
+        db.STATUS_DRAFT:              ("pending", "pending", "pending", "pending"),
+        db.STATUS_STAGE1_RUNNING:     ("active",  "pending", "pending", "pending"),
+        db.STATUS_STAGE2_RUNNING:     ("done",    "active",  "pending", "pending"),
+        db.STATUS_AWAITING_FINAL_URL: ("done",    "done",    "pending", "pending"),
+        db.STATUS_STAGE3_RUNNING:     ("done",    "done",    "active",  "pending"),
+        db.STATUS_BLOG_READY:         ("done",    "done",    "done",    "pending"),
+        db.STATUS_BANK_RUNNING:       ("done",    "done",    "done",    "active"),
+        db.STATUS_BANK_READY:         ("done",    "done",    "done",    "done"),
+        db.STATUS_QUORA_RUNNING:      ("done",    "done",    "done",    "done"),
+        db.STATUS_REDDIT_RUNNING:     ("done",    "done",    "done",    "done"),
+        db.STATUS_SUBSTACK_RUNNING:   ("done",    "done",    "done",    "done"),
+        db.STATUS_COMPLETE:           ("done",    "done",    "done",    "done"),
+        db.STATUS_CANCELLED:          ("pending", "pending", "pending", "pending"),
+    }
+
+    if status == db.STATUS_FAILED:
+        failed_at_stage = run.get("failed_at_stage", "")
+        marker = {
+            "stage_1_serp_paa":  ("failed",  "pending", "pending", "pending"),
+            "stage_2_context":   ("done",    "failed",  "pending", "pending"),
+            "stage_3_blog":      ("done",    "done",    "failed",  "pending"),
+            "stage_4_bank":      ("done",    "done",    "done",    "failed"),
+            "stage_5_drafts":    ("done",    "done",    "done",    "done"),
+        }.get(failed_at_stage, ("pending",) * 4)
+    else:
+        marker = state_to_progress.get(status, ("pending",) * 4)
+
+    return {
+        "stage_1": marker[0],
+        "stage_2": marker[1],
+        "stage_3": marker[2],
+        "stage_4": marker[3],
+    }
+
+
+def load_dashboard_data(limit: int = 30) -> dict:
+    runs = db.list_runs(limit=limit)
+    run_ids = [run["id"] for run in runs]
+
+    return {
+        "metrics": orchestrator.get_dashboard_metrics(),
+        "runs": runs,
+        "country_codes_by_run_id": get_country_codes_for_runs(run_ids),
+        "has_runs": bool(runs),
+    }
 # ─────────────────────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────────────────────
@@ -146,6 +196,22 @@ def render_run_detail(run_id: int):
             st.rerun()
         return
 
+    output_rows = get_generated_outputs(
+        run_id,
+        [
+            "blog",
+            "question_bank",
+            "quora_drafts",
+            "reddit_drafts",
+            "substack_drafts",
+        ],
+    )
+
+    outputs_by_type = {
+        row["output_type"]: row
+        for row in output_rows
+    }
+
     if st.button("← Back to dashboard"):
         st.query_params.clear()
         st.rerun()
@@ -169,18 +235,7 @@ def render_run_detail(run_id: int):
     with m2:
         st.metric("Run ID", f"#{run['id']}")
     with m3:
-        from app.database import fetch_one
-
-        blog_row = fetch_one(
-            """
-            SELECT r2_key
-            FROM generated_outputs
-            WHERE run_id = %s AND output_type = %s
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (run["id"], "blog"),
-        )
+        blog_row = outputs_by_type.get("blog")
 
         if blog_row:
             blog_r2_key = blog_row["r2_key"]
@@ -205,7 +260,7 @@ def render_run_detail(run_id: int):
 
     # Progress
     st.markdown(
-        progress_bar_html(orchestrator.progress_for_run(run_id)),
+        progress_bar_html(progress_from_run_status(run)),
         unsafe_allow_html=True,
     )
 
@@ -535,7 +590,7 @@ def render_run_detail(run_id: int):
             )
 
     with download_col_qb:
-        question_bank_row = get_question_bank_output(run_id)
+        question_bank_row = outputs_by_type.get("question_bank")
 
         if question_bank_row:
             try:
@@ -780,7 +835,7 @@ def render_run_detail(run_id: int):
         file_suffix: str,
         key_suffix: str,
     ) -> None:
-        output_row = get_platform_draft_output(run_id, platform)
+        output_row = outputs_by_type.get(output_type)
 
         if output_row:
             try:
@@ -981,19 +1036,22 @@ def render_dashboard():
         st.info("No runs yet. Click 'Start new run' above.")
         return
 
+    run_ids = [run["id"] for run in runs]
+    country_codes_by_run_id = get_country_codes_for_runs(run_ids)
+
     for run in runs:
         with st.container():
             cols = st.columns([4, 1.5, 1])
             with cols[0]:
                 st.markdown(f"**{run['primary_keyword']}**")
-                country_codes = get_run_country_codes(run["id"])
+                country_codes = country_codes_by_run_id.get(run["id"], [])
 
                 st.caption(
                     f"Run #{run['id']} · {', '.join(country_codes) or '—'} · "
                     f"{str(run['created_at']).replace('T', ' ')[:16]}"
                 )
                 st.markdown(
-                    progress_bar_html(orchestrator.progress_for_run(run['id'])),
+                    progress_bar_html(progress_from_run_status(run)),
                     unsafe_allow_html=True,
                 )
             with cols[1]:
@@ -1004,7 +1062,6 @@ def render_dashboard():
                     st.query_params["run"] = str(run["id"])
                     st.rerun()
             st.markdown("---")
-
 
 # ─────────────────────────────────────────────────────────────
 # Route
