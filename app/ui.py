@@ -154,6 +154,17 @@ def progress_from_run_status(run: dict) -> dict:
         "stage_4": marker[3],
     }
 
+
+def load_dashboard_data(limit: int = 30) -> dict:
+    runs = db.list_runs(limit=limit)
+    run_ids = [run["id"] for run in runs]
+
+    return {
+        "metrics": orchestrator.get_dashboard_metrics(),
+        "runs": runs,
+        "country_codes_by_run_id": get_country_codes_for_runs(run_ids),
+        "has_runs": bool(runs),
+    }
 # ─────────────────────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────────────────────
@@ -1045,7 +1056,7 @@ def render_dashboard():
                     st.query_params["run"] = str(run["id"])
                     st.rerun()
             st.markdown("---")
-            
+
 # ─────────────────────────────────────────────────────────────
 # Route
 # ─────────────────────────────────────────────────────────────
